@@ -26,8 +26,8 @@ ADMIN_USERNAME = "Hobabadmin"
 # یوزرنیم ربات چک مانده سرویس
 BALANCE_BOT_USERNAME = "reportvolume_bot"
 
-# شماره کارت برای پرداخت کارت‌به‌کارت (بدون خط تیره جهت کپی آسان با لمس)
-CARD_NUMBER = "5022291336830904"
+# شماره کارت برای پرداخت کارت‌به‌کارت
+CARD_NUMBER = "5022 2913 3683 0904"
 CARD_HOLDER = "علی باقری فرد"
 
 PLANS = {
@@ -184,6 +184,7 @@ def main_menu_keyboard():
 
 HOME_BUTTON_TEXT = "🏠 منوی اصلی"
 
+# حذف is_persistent جهت جلوگیری از گیر کردن دکمه بازگشت گوشی
 PERSISTENT_KEYBOARD = ReplyKeyboardMarkup(
     [[HOME_BUTTON_TEXT]],
     resize_keyboard=True,
@@ -223,15 +224,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=main_menu_keyboard(),
     )
 
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def home_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("pending_plan", None)
     await update.message.reply_text(
-        "❌ عملیات جاری لغو شد.\n\n🏠 منوی اصلی:",
+        "🏠 منوی اصلی:",
         reply_markup=main_menu_keyboard(),
     )
 
-async def home_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.pop("pending_plan", None)
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    had_pending = context.user_data.pop("pending_plan", None) is not None
+    text = (
+        "❌ فرآیند خرید لغو شد و از آن خارج شدید."
+        if had_pending
+        else "چیزی برای لغو کردن وجود نداشت."
+    )
+    await update.message.reply_text(text, reply_markup=PERSISTENT_KEYBOARD)
     await update.message.reply_text(
         "🏠 منوی اصلی:",
         reply_markup=main_menu_keyboard(),
@@ -268,9 +275,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "all_prices":
+        # دکمه‌ی «خرید سرور» که کاربر را مستقیم به انتخاب تک‌کاربره/دو‌کاربره برمی‌گرداند
         keyboard = [
-            [InlineKeyboardButton("🛒 خرید اشتراک", callback_data="plans")],
-            [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="back")]
+            [InlineKeyboardButton("🛒 خرید سرور", callback_data="plans")],
+            [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="back")],
         ]
         await query.edit_message_text(
             build_full_price_list_text(),
@@ -292,12 +300,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💰 **مبلغ:** {format_toman(plan['toman'])}\n"
             f"💱 **معادل ریالی:** {format_rial(plan['toman'])}\n\n"
             f"────────────────────\n"
-            f"💳 **شماره کارت جهت واریز (برای کپی لمس کنید):**\n"
+            f"💳 **شماره کارت جهت واریز:**\n"
             f"`{CARD_NUMBER}`\n"
+            f"_(روی شماره کارت بزنید تا کپی شود)_\n"
             f"👤 **به نام:** {CARD_HOLDER}\n"
             f"────────────────────\n\n"
-            f"📸 لطفاً بعد از واریز، **عکس رسید پرداخت** را همینجا ارسال کنید.\n"
-            f"💡 در صورت انصراف می‌توانید دستور /cancel را ارسال کنید."
+            f"📸 لطفاً بعد از واریز، **عکس رسید پرداخت** را همینجا ارسال کنید تا سریعاً بررسی و تایید شود."
         )
         keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data=f"sub_{cat_key}_{sub_key}")]]
         await query.edit_message_text(
@@ -423,7 +431,7 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application: Application):
     await application.bot.set_my_commands([
         ("start", "شروع / منوی اصلی"),
-        ("cancel", "لغو عملیات و بازگشت به منوی اصلی"),
+        ("cancel", "لغو عملیات جاری و خروج"),
     ])
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -448,7 +456,7 @@ def main():
     app = Application.builder().token(TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("cancel", cancel_command))
+    app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.Regex(f"^{HOME_BUTTON_TEXT}$"), home_button_handler))
     app.add_handler(MessageHandler(filters.PHOTO, receipt_handler))
