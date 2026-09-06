@@ -400,18 +400,21 @@ async def post_init(application: Application):
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
+        self.send_header("Content-type", "text/plain")
         self.end_headers()
         self.wfile.write(b"OK")
 
 def start_dummy_server():
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    print(f"Dummy server running on port {port}...")
     server.serve_forever()
 
 def main():
     init_db()
     
-    threading.Thread(target=start_dummy_server, daemon=True).start()
+    server_thread = threading.Thread(target=start_dummy_server, daemon=True)
+    server_thread.start()
 
     app = Application.builder().token(TOKEN).post_init(post_init).build()
 
