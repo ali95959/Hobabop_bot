@@ -397,7 +397,6 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application: Application):
     await application.bot.set_my_commands([("start", "شروع / منوی اصلی")])
 
-# سرور ساختگی برای تایید پورت توسط Render
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -412,7 +411,6 @@ def start_dummy_server():
 def main():
     init_db()
     
-    # اجرای سرور وب در یک ترد جداگانه
     threading.Thread(target=start_dummy_server, daemon=True).start()
 
     app = Application.builder().token(TOKEN).post_init(post_init).build()
@@ -423,7 +421,7 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, receipt_handler))
 
     print("ربات آنلاین شد...")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
