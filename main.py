@@ -96,18 +96,19 @@ def find_plan(plan_id: str):
     return None, None, None
 
 def build_full_price_list_text() -> str:
-    lines = ["💵 تعرفه‌های اشتراک‌های طرح پرو:", ""]
+    lines = ["💎 **لیست کلی تعرفه‌های اشتراک طرح پرو** 💎", "────────────────────", ""]
     for cat_key in ("single", "double"):
         cat = PLANS[cat_key]
-        lines.append(f"{cat['title']}:")
+        lines.append(f"📌 **{cat['title']}**")
         lines.append("")
         for sub_key in ("m1", "m3"):
             sub = cat["subcats"][sub_key]
-            lines.append(f"{sub['title']}:")
-            lines.append("")
+            lines.append(f"  🔹 {sub['title']}:")
             for item in sub["items"]:
-                lines.append(f"{item['label']} {format_toman(item['toman'])}")
+                lines.append(f"     • {item['label']} ── 💰 **{format_toman(item['toman'])}**")
             lines.append("")
+        lines.append("────────────────────")
+        lines.append("")
     return "\n".join(lines).strip()
 
 DB_FILE = "orders.db"
@@ -194,7 +195,7 @@ def plans_keyboard():
         [InlineKeyboardButton("🌀 تک کاربره", callback_data="cat_single")],
         [InlineKeyboardButton("🌀 دو کاربره", callback_data="cat_double")],
         [InlineKeyboardButton("📋 لیست کلی قیمت‌ها", callback_data="all_prices")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="back")],
+        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="back")],
     ])
 
 def category_keyboard(cat_key: str):
@@ -215,18 +216,18 @@ def subcat_keyboard(cat_key: str, sub_key: str):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("pending_plan", None)
     await update.message.reply_text(
-        "سلام، جهت خرید یا تمدید سرور open connect در خدمتم😉",
+        "سلام! به ربات حباب خوش آمدید 😉\nجهت خرید یا تمدید سرور OpenConnect در خدمتیم.",
         reply_markup=PERSISTENT_KEYBOARD,
     )
     await update.message.reply_text(
-        "یکی از گزینه‌های زیر رو انتخاب کن:",
+        "لطفاً یکی از گزینه‌های زیر را انتخاب کنید:",
         reply_markup=main_menu_keyboard(),
     )
 
 async def home_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("pending_plan", None)
     await update.message.reply_text(
-        "منوی اصلی:",
+        "🏠 منوی اصلی:",
         reply_markup=main_menu_keyboard(),
     )
 
@@ -237,14 +238,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "plans":
         await query.edit_message_text(
-            "💵 تعرفه اشتراک‌های طرح پرو:\n\nنوع اشتراک رو انتخاب کن، یا لیست کلی قیمت‌ها رو ببین:",
+            "🛒 **بخش خرید اشتراک**\n\nلطفاً نوع اشتراک مورد نظر خود را انتخاب کنید یا لیست کلی قیمت‌ها را ببینید:",
+            parse_mode="Markdown",
             reply_markup=plans_keyboard(),
         )
 
     elif data.startswith("cat_"):
         cat_key = data.split("_", 1)[1]
         await query.edit_message_text(
-            f"{PLANS[cat_key]['title']}\n\nمدت اشتراک رو انتخاب کن:",
+            f"✨ **{PLANS[cat_key]['title']}**\n\nلطفاً مدت زمان اشتراک را انتخاب کنید:",
+            parse_mode="Markdown",
             reply_markup=category_keyboard(cat_key),
         )
 
@@ -253,14 +256,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cat = PLANS[cat_key]
         sub = cat["subcats"][sub_key]
         await query.edit_message_text(
-            f"{cat['title']} — {sub['title']}\n\nپلن مورد نظرت رو انتخاب کن:",
+            f"⚡️ **{cat['title']} — {sub['title']}**\n\nپلن مورد نظر خود را جهت خرید انتخاب کنید:",
+            parse_mode="Markdown",
             reply_markup=subcat_keyboard(cat_key, sub_key),
         )
 
     elif data == "all_prices":
-        keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data="plans")]]
+        keyboard = [[InlineKeyboardButton("🛒 خرید اکانت", callback_data="plans")]]
         await query.edit_message_text(
             build_full_price_list_text(),
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
@@ -274,28 +279,38 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["pending_plan"] = plan
 
         text = (
-            f"✅ پلن انتخابی: {plan['label']}\n"
-            f"💰 مبلغ: {format_toman(plan['toman'])}\n"
-            f"💱 معادل این میشه: {format_rial(plan['toman'])}\n\n"
-            f"لطفاً مبلغ رو به شماره کارت زیر واریز کن:\n\n"
-            f"💳 {CARD_NUMBER}\n"
-            f"👤 به نام: {CARD_HOLDER}\n\n"
-            f"بعد از واریز، عکس رسید پرداخت رو همینجا برام بفرست تا سریع بررسی و تایید کنم."
+            f"✅ **پلن انتخابی:** {plan['label']}\n"
+            f"💰 **مبلغ:** {format_toman(plan['toman'])}\n"
+            f"💱 **معادل ریالی:** {format_rial(plan['toman'])}\n\n"
+            f"────────────────────\n"
+            f"💳 **شماره کارت جهت واریز:**\n"
+            f"`{CARD_NUMBER}`\n"
+            f"👤 **به نام:** {CARD_HOLDER}\n"
+            f"────────────────────\n\n"
+            f"📸 لطفاً بعد از واریز، **عکس رسید پرداخت** را همینجا ارسال کنید تا سریعاً بررسی و تایید شود."
         )
         keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data=f"sub_{cat_key}_{sub_key}")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
 
     elif data == "my_services":
         orders = get_user_orders(query.from_user.id, status="confirmed")
         if not orders:
-            text = "📦 هنوز سرویس فعالی برای این حساب ثبت نشده."
+            text = "📦 هنوز سرویس فعالی برای این حساب ثبت نشده است."
         else:
-            lines = ["📦 سرویس‌های فعال شما:\n"]
+            lines = ["📦 **سرویس‌های فعال شما:**\n"]
             for plan_label, price, created_at in orders:
-                lines.append(f"✅ {plan_label} — {price}\n🗓 تاریخ خرید: {created_at}\n")
+                lines.append(f"✅ **{plan_label}** — {price}\n🗓 تاریخ خرید: {created_at}\n")
             text = "\n".join(lines)
         keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data="back")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
 
     elif data == "support":
         keyboard = [
@@ -303,7 +318,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔙 بازگشت", callback_data="back")],
         ]
         await query.edit_message_text(
-            "🎧 برای پشتیبانی، روی دکمه‌ی زیر بزن تا مستقیم چت باز بشه:",
+            "🎧 برای دریافت پشتیبانی روی دکمه زیر کلیک کنید تا مستقیم چت باز شود:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
@@ -313,16 +328,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔙 بازگشت", callback_data="back")],
         ]
         await query.edit_message_text(
-            "📊 برای چک کردن مانده‌ی سرویست روی دکمه‌ی زیر بزن و ادامه‌ی کار رو با همون ربات انجام بده:",
+            "📊 برای بررسی مانده سرویس خود، روی دکمه زیر کلیک کرده و ادامه مراحل را در ربات استعلام انجام دهید:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
     elif data == "back":
-        await query.edit_message_text("منوی اصلی:", reply_markup=main_menu_keyboard())
+        await query.edit_message_text("🏠 منوی اصلی:", reply_markup=main_menu_keyboard())
 
     elif data.startswith("confirm_") or data.startswith("reject_"):
         if query.from_user.id != ADMIN_ID:
-            await query.answer("این دکمه فقط برای ادمینه.", show_alert=True)
+            await query.answer("این دکمه فقط برای ادمین است.", show_alert=True)
             return
 
         action, order_id_str = data.split("_", 1)
@@ -337,23 +352,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             set_order_status(order_id, "confirmed")
             await context.bot.send_message(
                 chat_id=order["user_id"],
-                text="✅ پرداخت شما تایید شد! سرویست تو بخش «📦 سرویس‌های من» قابل مشاهده‌ست.",
+                text="✅ پرداخت شما تایید شد! سرویس شما فعال گردید و در بخش «📦 سرویس‌های من» قابل مشاهده است.",
             )
-            await query.edit_message_caption(caption=query.message.caption + "\n\n✅ تایید شد")
+            await query.edit_message_caption(caption=query.message.caption + "\n\n✅ **تایید شد**", parse_mode="Markdown")
         else:
             set_order_status(order_id, "rejected")
             await context.bot.send_message(
                 chat_id=order["user_id"],
-                text="❌ رسید ارسالی تایید نشد. لطفاً با پشتیبانی در تماس باش یا رسید صحیح رو دوباره ارسال کن.",
+                text="❌ رسید ارسالی تایید نشد. لطفاً با پشتیبانی در تماس باشید یا رسید صحیح را مجدداً ارسال کنید.",
             )
-            await query.edit_message_caption(caption=query.message.caption + "\n\n❌ رد شد")
+            await query.edit_message_caption(caption=query.message.caption + "\n\n❌ **رد شد**", parse_mode="Markdown")
 
 async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     plan = context.user_data.get("pending_plan")
 
     if not plan:
         await update.message.reply_text(
-            "برای ارسال رسید، اول باید یه پلن از بخش «🛒 خرید اشتراک» انتخاب کنی."
+            "⚠️ برای ارسال رسید، ابتدا باید یک پلن از بخش «🛒 خرید اشتراک» انتخاب کنید."
         )
         return
 
@@ -364,13 +379,13 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order_id = create_order(user.id, plan["label"], price_text)
 
     caption = (
-        f"🧾 رسید پرداخت جدید (سفارش #{order_id})\n\n"
+        f"🧾 **رسید پرداخت جدید (سفارش #{order_id})**\n\n"
         f"👤 کاربر: {user.full_name}\n"
-        f"🆔 آیدی عددی: {user.id}\n"
+        f"🆔 آیدی عددی: `{user.id}`\n"
         f"یوزرنیم: @{user.username if user.username else '---'}\n\n"
-        f"📦 پلن انتخابی: {plan['label']}\n"
-        f"💰 مبلغ: {price_text}\n"
-        f"💱 معادل ریالی: {format_rial(plan['toman'])}"
+        f"📦 پلن انتخابی: **{plan['label']}**\n"
+        f"💰 مبلغ: **{price_text}**\n"
+        f"💱 معادل ریالی: **{format_rial(plan['toman'])}**"
     )
 
     admin_keyboard = InlineKeyboardMarkup([
@@ -384,12 +399,13 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id=ADMIN_ID,
         photo=photo_file_id,
         caption=caption,
+        parse_mode="Markdown",
         reply_markup=admin_keyboard,
     )
 
     await update.message.reply_text(
-        "✅ رسید شما دریافت شد و برای بررسی ارسال شد.\n"
-        "به محض تایید، بهت اطلاع داده میشه. لطفاً کمی صبر کن 🙏"
+        "✅ رسید شما با موفقیت دریافت شد و برای ادمین ارسال گردید.\n"
+        "به محض تایید، به شما اطلاع داده خواهد شد. لطفاً کمی شکیبا باشید 🙏"
     )
 
     context.user_data.pop("pending_plan", None)
