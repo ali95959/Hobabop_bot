@@ -1,4 +1,7 @@
+import os
 import sqlite3
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
@@ -11,10 +14,10 @@ from telegram.ext import (
     filters,
 )
 
-# توکن ربات جدید شما
+# توکن ربات
 TOKEN = "8998126217:AAHmbAmXe3aLyrPYVKnpJTfPBWwhUgE3U10"
 
-# آیدی عددی شما
+# آیدی عددی ادمین
 ADMIN_ID = 6922701713
 
 # یوزرنیم پشتیبانی
@@ -394,8 +397,24 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application: Application):
     await application.bot.set_my_commands([("start", "شروع / منوی اصلی")])
 
+# سرور ساختگی برای تایید پورت توسط Render
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def start_dummy_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
+
 def main():
     init_db()
+    
+    # اجرای سرور وب در یک ترد جداگانه
+    threading.Thread(target=start_dummy_server, daemon=True).start()
+
     app = Application.builder().token(TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
