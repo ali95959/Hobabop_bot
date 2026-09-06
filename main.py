@@ -184,10 +184,10 @@ def main_menu_keyboard():
 
 HOME_BUTTON_TEXT = "🏠 منوی اصلی"
 
+# حذف is_persistent جهت جلوگیری از گیر کردن دکمه بازگشت گوشی
 PERSISTENT_KEYBOARD = ReplyKeyboardMarkup(
     [[HOME_BUTTON_TEXT]],
     resize_keyboard=True,
-    is_persistent=True,
 )
 
 def plans_keyboard():
@@ -262,6 +262,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "all_prices":
+        # تغییر دکمه زیر لیست به «🛒 خرید اکانت»
         keyboard = [[InlineKeyboardButton("🛒 خرید اکانت", callback_data="plans")]]
         await query.edit_message_text(
             build_full_price_list_text(),
