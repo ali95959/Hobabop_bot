@@ -34,7 +34,8 @@ logging.getLogger("httpx").setLevel(logging.WARNING)  # جلوگیری از لا
 logger = logging.getLogger("hobab-bot")
 
 # توکن ربات
-TOKEN = os.environ.get("BOT_TOKEN")
+# اگر متغیر محیطی BOT_TOKEN تنظیم شده باشد همان استفاده می‌شود؛ در غیر این صورت مقدار پیش‌فرض زیر.
+TOKEN = os.environ.get("BOT_TOKEN") or "8998126217:AAF91fQE3VRIIfhCLx9HwBviwXdxIG6X0DA"
 
 # آیدی عددی ادمین
 ADMIN_ID = 6922701713
