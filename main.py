@@ -46,8 +46,8 @@ PLANS = {
             "m1": {
                 "title": "✨ یک ماهه",
                 "items": [
-                    {"id": "s_m1_20", "label": "یکماه تک کاربر ۲۰ گیگ", "toman": 240},
-                    {"id": "s_m1_40", "label": "یکماه تک کاربر ۴۰ گیگ", "toman": 420},
+                    {"id": "s_m1_20", "label": "یکماه تک کاربر ۲۰ گیگ", "toman": 260},
+                    {"id": "s_m1_40", "label": "یکماه تک کاربر ۴۰ گیگ", "toman": 420, "recommended": True},
                     {"id": "s_m1_60", "label": "یکماه تک کاربر ۶۰ گیگ", "toman": 550},
                     {"id": "s_m1_100", "label": "یکماه تک کاربر ۱۰۰ گیگ", "toman": 690},
                 ],
@@ -55,7 +55,7 @@ PLANS = {
             "m3": {
                 "title": "✨ سه ماهه",
                 "items": [
-                    {"id": "s_m3_100", "label": "سه ماه تک کاربر ۱۰۰ گیگ", "toman": 990},
+                    {"id": "s_m3_100", "label": "سه ماه تک کاربر ۱۰۰ گیگ", "toman": 1190, "recommended": True},
                     {"id": "s_m3_150", "label": "سه ماه تک کاربر ۱۵۰ گیگ", "toman": 1390},
                     {"id": "s_m3_180", "label": "سه ماه تک کاربر ۱۸۰ گیگ", "toman": 1590},
                 ],
@@ -68,23 +68,25 @@ PLANS = {
             "m1": {
                 "title": "✨ یک ماهه",
                 "items": [
-                    {"id": "d_m1_40", "label": "یکماه دو کاربر ۴۰ گیگ", "toman": 540},
-                    {"id": "d_m1_60", "label": "یکماه دو کاربر ۶۰ گیگ", "toman": 650},
-                    {"id": "d_m1_80", "label": "یکماه دو کاربر ۸۰ گیگ", "toman": 750},
-                    {"id": "d_m1_100", "label": "یکماه دو کاربر ۱۰۰ گیگ", "toman": 890},
+                    {"id": "d_m1_40", "label": "یکماه دو کاربر ۴۰ گیگ", "toman": 590},
+                    {"id": "d_m1_60", "label": "یکماه دو کاربر ۶۰ گیگ", "toman": 740},
+                    {"id": "d_m1_80", "label": "یکماه دو کاربر ۸۰ گیگ", "toman": 840, "recommended": True},
+                    {"id": "d_m1_100", "label": "یکماه دو کاربر ۱۰۰ گیگ", "toman": 930},
                 ],
             },
             "m3": {
                 "title": "✨ سه ماهه",
                 "items": [
-                    {"id": "d_m3_100", "label": "سه ماه دو کاربر ۱۰۰ گیگ", "toman": 1190},
-                    {"id": "d_m3_200", "label": "سه ماه دو کاربر ۲۰۰ گیگ", "toman": 1790},
-                    {"id": "d_m3_360", "label": "سه ماه دو کاربر ۳۶۰ گیگ", "toman": 2090},
+                    {"id": "d_m3_100", "label": "سه ماه دو کاربر ۱۰۰ گیگ", "toman": 1490},
+                    {"id": "d_m3_200", "label": "سه ماه دو کاربر ۲۰۰ گیگ", "toman": 1990},
+                    {"id": "d_m3_360", "label": "سه ماه دو کاربر ۳۶۰ گیگ", "toman": 2390, "recommended": True},
                 ],
             },
         },
     },
 }
+
+CHANNEL_USERNAME = "HobabServices"
 
 def to_persian_digits(text: str) -> str:
     return text.translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
@@ -104,8 +106,26 @@ def find_plan(plan_id: str):
                     return cat_key, sub_key, item
     return None, None, None
 
+def plan_button_text(item: dict) -> str:
+    prefix = "🔥 " if item.get("recommended") else ""
+    return f"{prefix}{item['label']} — {format_toman(item['toman'])}"
+
+def get_recommended_plans():
+    result = []
+    for cat_key, category in PLANS.items():
+        for sub_key, sub in category["subcats"].items():
+            for item in sub["items"]:
+                if item.get("recommended"):
+                    result.append((cat_key, sub_key, item))
+    return result
+
 def build_full_price_list_text() -> str:
-    lines = ["💎 **لیست کلی تعرفه‌های اشتراک طرح پرو** 💎", "────────────────────", ""]
+    lines = [
+        "💎 **لیست کلی تعرفه‌های اشتراک طرح پرو** 💎",
+        "🔥 = پلن پیشنهادی ما",
+        "────────────────────",
+        "",
+    ]
     for cat_key in ("single", "double"):
         cat = PLANS[cat_key]
         lines.append(f"📌 **{cat['title']}**")
@@ -114,10 +134,12 @@ def build_full_price_list_text() -> str:
             sub = cat["subcats"][sub_key]
             lines.append(f"  🔹 {sub['title']}:")
             for item in sub["items"]:
-                lines.append(f"     • {item['label']} ── 💰 **{format_toman(item['toman'])}**")
+                mark = "  🔥 (پیشنهادی)" if item.get("recommended") else ""
+                lines.append(f"     • {item['label']} ── 💰 **{format_toman(item['toman'])}**{mark}")
             lines.append("")
         lines.append("────────────────────")
         lines.append("")
+    lines.append(f"📢 کانال ما: @{CHANNEL_USERNAME}")
     return "\n".join(lines).strip()
 
 DB_FILE = "orders.db"
@@ -220,6 +242,7 @@ PERSISTENT_KEYBOARD = ReplyKeyboardMarkup(
 
 def plans_keyboard():
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔥 پلن‌های پیشنهادی (پرفروش‌ترین‌ها)", callback_data="recommended")],
         [InlineKeyboardButton("🌀 تک کاربره", callback_data="cat_single")],
         [InlineKeyboardButton("🌀 دو کاربره", callback_data="cat_double")],
         [InlineKeyboardButton("📋 لیست کلی قیمت‌ها", callback_data="all_prices")],
@@ -236,8 +259,7 @@ def category_keyboard(cat_key: str):
 def subcat_keyboard(cat_key: str, sub_key: str):
     buttons = []
     for item in PLANS[cat_key]["subcats"][sub_key]["items"]:
-        text = f"{item['label']} — {format_toman(item['toman'])}"
-        buttons.append([InlineKeyboardButton(text, callback_data=f"buy_{item['id']}")])
+        buttons.append([InlineKeyboardButton(plan_button_text(item), callback_data=f"buy_{item['id']}")])
     buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data=f"cat_{cat_key}")])
     return InlineKeyboardMarkup(buttons)
 
@@ -395,6 +417,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "renew":
         await start_renewal_flow(update, context, via_callback=True)
 
+    elif data == "recommended":
+        buttons = [
+            [InlineKeyboardButton(plan_button_text(item), callback_data=f"buy_{item['id']}")]
+            for _cat, _sub, item in get_recommended_plans()
+        ]
+        buttons.append([InlineKeyboardButton("📋 لیست کلی قیمت‌ها", callback_data="all_prices")])
+        buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="plans")])
+        await query.edit_message_text(
+            "🔥 **پلن‌های پیشنهادی ما**\n\n"
+            "منتخب پلن‌ها برای هر دسته؛ انتخاب اول بیشتر کاربرها.\n"
+            "یکی را انتخاب کنید تا مستقیم به مرحله‌ی پرداخت بروید 👇",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
     elif data.startswith("cat_"):
         cat_key = data.split("_", 1)[1]
         await query.edit_message_text(
@@ -408,7 +445,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cat = PLANS[cat_key]
         sub = cat["subcats"][sub_key]
         await query.edit_message_text(
-            f"⚡️ **{cat['title']} — {sub['title']}**\n\nپلن مورد نظر خود را جهت خرید انتخاب کنید:",
+            f"⚡️ **{cat['title']} — {sub['title']}**\n\nپلن مورد نظر خود را جهت خرید انتخاب کنید:\n🔥 = پلن پیشنهادی ما",
             parse_mode="Markdown",
             reply_markup=subcat_keyboard(cat_key, sub_key),
         )
@@ -439,8 +476,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔄 **نام کاربری جهت تمدید:** `{renewal_username}`\n\n" if renewal_username else ""
         )
 
+        recommended_note = "🔥 **انتخاب عالی! این یکی از پلن‌های پیشنهادی ماست.**\n\n" if plan.get("recommended") else ""
+
         text = (
             f"{renewal_note}"
+            f"{recommended_note}"
             f"✅ **پلن انتخابی:** {plan['label']}\n"
             f"💰 **مبلغ:** {format_toman(plan['toman'])}\n"
             f"💱 **معادل ریالی:** {format_rial(plan['toman'])}\n\n"
