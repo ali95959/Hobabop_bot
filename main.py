@@ -107,7 +107,7 @@ def find_plan(plan_id: str):
     return None, None, None
 
 def plan_button_text(item: dict) -> str:
-    prefix = "🔥 " if item.get("recommended") else ""
+    prefix = "🔥 (پیشنهادی) " if item.get("recommended") else ""
     return f"{prefix}{item['label']} — {format_toman(item['toman'])}"
 
 def get_recommended_plans():
@@ -217,6 +217,7 @@ def main_menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🛒 خرید اشتراک", callback_data="plans")],
         [InlineKeyboardButton("🔄 تمدید سرور", callback_data="renew")],
+        [InlineKeyboardButton("📋 لیست قیمت‌ها", callback_data="all_prices")],
         [InlineKeyboardButton("📦 سرویس‌های من", callback_data="my_services")],
         [InlineKeyboardButton("📊 چک کردن مانده سرویس", callback_data="check_balance")],
         [InlineKeyboardButton("🎧 پشتیبانی", callback_data="support")],
@@ -224,6 +225,7 @@ def main_menu_keyboard():
 
 BUY_BUTTON_TEXT = "🛒 خرید اشتراک"
 RENEW_BUTTON_TEXT = "🔄 تمدید سرور"
+PRICE_LIST_BUTTON_TEXT = "📋 لیست قیمت‌ها"
 MY_SERVICES_BUTTON_TEXT = "📦 سرویس‌های من"
 CHECK_BALANCE_BUTTON_TEXT = "📊 چک کردن مانده سرویس"
 SUPPORT_BUTTON_TEXT = "🎧 پشتیبانی"
@@ -234,8 +236,9 @@ HOME_BUTTON_TEXT = "🏠 منوی اصلی"
 PERSISTENT_KEYBOARD = ReplyKeyboardMarkup(
     [
         [BUY_BUTTON_TEXT, RENEW_BUTTON_TEXT],
-        [MY_SERVICES_BUTTON_TEXT, CHECK_BALANCE_BUTTON_TEXT],
-        [SUPPORT_BUTTON_TEXT, HOME_BUTTON_TEXT],
+        [PRICE_LIST_BUTTON_TEXT, MY_SERVICES_BUTTON_TEXT],
+        [CHECK_BALANCE_BUTTON_TEXT, SUPPORT_BUTTON_TEXT],
+        [HOME_BUTTON_TEXT],
     ],
     resize_keyboard=True,
 )
@@ -245,7 +248,12 @@ def plans_keyboard():
         [InlineKeyboardButton("🔥 پلن‌های پیشنهادی (پرفروش‌ترین‌ها)", callback_data="recommended")],
         [InlineKeyboardButton("🌀 تک کاربره", callback_data="cat_single")],
         [InlineKeyboardButton("🌀 دو کاربره", callback_data="cat_double")],
-        [InlineKeyboardButton("📋 لیست کلی قیمت‌ها", callback_data="all_prices")],
+        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="back")],
+    ])
+
+def price_list_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🛒 خرید اشتراک", callback_data="plans")],
         [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="back")],
     ])
 
@@ -330,6 +338,14 @@ async def buy_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "🛒 **بخش خرید اشتراک**\n\nلطفاً نوع اشتراک مورد نظر خود را انتخاب کنید یا لیست کلی قیمت‌ها را ببینید:",
         parse_mode="Markdown",
         reply_markup=plans_keyboard(),
+    )
+
+async def price_list_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reset_transient_state(context)
+    await update.message.reply_text(
+        build_full_price_list_text(),
+        parse_mode="Markdown",
+        reply_markup=price_list_keyboard(),
     )
 
 async def renew_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -422,7 +438,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton(plan_button_text(item), callback_data=f"buy_{item['id']}")]
             for _cat, _sub, item in get_recommended_plans()
         ]
-        buttons.append([InlineKeyboardButton("📋 لیست کلی قیمت‌ها", callback_data="all_prices")])
         buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="plans")])
         await query.edit_message_text(
             "🔥 **پلن‌های پیشنهادی ما**\n\n"
@@ -451,15 +466,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "all_prices":
-        # دکمه‌ی «خرید سرور» که کاربر را مستقیم به انتخاب تک‌کاربره/دو‌کاربره برمی‌گرداند
-        keyboard = [
-            [InlineKeyboardButton("🛒 خرید سرور", callback_data="plans")],
-            [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="back")],
-        ]
         await query.edit_message_text(
             build_full_price_list_text(),
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=price_list_keyboard(),
         )
 
     elif data.startswith("buy_"):
@@ -707,6 +717,7 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(HOME_BUTTON_TEXT)}$"), home_button_handler))
     app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BUY_BUTTON_TEXT)}$"), buy_button_handler))
     app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(RENEW_BUTTON_TEXT)}$"), renew_button_handler))
+    app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(PRICE_LIST_BUTTON_TEXT)}$"), price_list_button_handler))
     app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(MY_SERVICES_BUTTON_TEXT)}$"), my_services_button_handler))
     app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(CHECK_BALANCE_BUTTON_TEXT)}$"), check_balance_button_handler))
     app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(SUPPORT_BUTTON_TEXT)}$"), support_button_handler))
