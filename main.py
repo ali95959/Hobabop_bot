@@ -1,11 +1,14 @@
 import os
 import re
+import html
+import logging
 import sqlite3
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -14,6 +17,10 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+
+logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)  # جلوگیری از لاگ شدن توکن در URLها
+logger = logging.getLogger("hobab-bot")
 
 # توکن ربات
 TOKEN = "8998126217:AAHmbAmXe3aLyrPYVKnpJTfPBWwhUgE3U10"
@@ -494,77 +501,128 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         action, order_id_str = data.split("_", 1)
         order_id = int(order_id_str)
         order = get_order(order_id)
+        # caption_html: قالب‌بندی اصلی حفظ می‌شود و نام/یوزرنیم کاربر دوباره پارس نمی‌شود
+        old_caption = query.message.caption_html or ""
 
         if not order:
-            await query.edit_message_caption(caption=(query.message.caption or "") + "\n\n⚠️ این سفارش پیدا نشد.")
+            await query.edit_message_caption(
+                caption=old_caption + "\n\n⚠️ این سفارش پیدا نشد.", parse_mode="HTML"
+            )
             return
 
         if action == "confirm":
             set_order_status(order_id, "confirmed")
-            await context.bot.send_message(
-                chat_id=order["user_id"],
-                text="✅ پرداخت شما تایید شد! سرویس شما فعال گردید و در بخش «📦 سرویس‌های من» قابل مشاهده است.",
-            )
-            await query.edit_message_caption(caption=query.message.caption + "\n\n✅ **تایید شد**", parse_mode="Markdown")
+            user_text = "✅ پرداخت شما تایید شد! سرویس شما فعال گردید و در بخش «📦 سرویس‌های من» قابل مشاهده است."
+            suffix = "\n\n✅ <b>تایید شد</b>"
         else:
             set_order_status(order_id, "rejected")
-            await context.bot.send_message(
-                chat_id=order["user_id"],
-                text="❌ رسید ارسالی تایید نشد. لطفاً با پشتیبانی در تماس باشید یا رسید صحیح را مجدداً ارسال کنید.",
-            )
-            await query.edit_message_caption(caption=query.message.caption + "\n\n❌ **رد شد**", parse_mode="Markdown")
+            user_text = "❌ رسید ارسالی تایید نشد. لطفاً با پشتیبانی در تماس باشید یا رسید صحیح را مجدداً ارسال کنید."
+            suffix = "\n\n❌ <b>رد شد</b>"
+
+        try:
+            await context.bot.send_message(chat_id=order["user_id"], text=user_text)
+        except TelegramError:
+            logger.exception("Could not notify user %s about order %s", order["user_id"], order_id)
+            suffix += "\n⚠️ پیام به کاربر ارسال نشد (احتمالاً ربات را بلاک کرده)."
+
+        await query.edit_message_caption(caption=old_caption + suffix, parse_mode="HTML")
 
 async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    plan = context.user_data.get("pending_plan")
+    message = update.message
+    user = update.effective_user
 
-    if not plan:
-        await update.message.reply_text(
-            "⚠️ برای ارسال رسید، ابتدا باید یک پلن از بخش «🛒 خرید اشتراک» انتخاب کنید."
+    # رسید می‌تواند عکس معمولی، عکس ارسال‌شده «به‌صورت فایل» یا PDF باشد
+    if message.photo:
+        file_id, is_photo = message.photo[-1].file_id, True
+    elif message.document:
+        file_id, is_photo = message.document.file_id, False
+    else:
+        return
+
+    logger.info("Receipt received from user %s (photo=%s)", user.id, is_photo)
+
+    plan = context.user_data.get("pending_plan")
+    renewal_username = context.user_data.get("renewal_username")
+
+    # تمام متن‌های وارد‌شده توسط کاربر escape می‌شوند تا پارس HTML خطا ندهد
+    safe_name = html.escape(user.full_name or "---")
+    safe_username = html.escape(user.username) if user.username else "---"
+    renewal_line = (
+        f"🔄 نام کاربری سرور جهت تمدید: <code>{html.escape(renewal_username)}</code>\n\n"
+        if renewal_username else ""
+    )
+    user_block = (
+        f"👤 کاربر: {safe_name}\n"
+        f"🆔 آیدی عددی: <code>{user.id}</code>\n"
+        f"یوزرنیم: @{safe_username}\n\n"
+    )
+
+    if plan:
+        price_text = format_toman(plan["toman"])
+        order_id = create_order(user.id, plan["label"], price_text)
+        caption = (
+            f"🧾 <b>رسید پرداخت جدید (سفارش #{order_id})</b>\n\n"
+            f"{user_block}"
+            f"{renewal_line}"
+            f"📦 پلن انتخابی: <b>{html.escape(plan['label'])}</b>\n"
+            f"💰 مبلغ: <b>{price_text}</b>\n"
+            f"💱 معادل ریالی: <b>{format_rial(plan['toman'])}</b>"
+        )
+        admin_keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ تایید", callback_data=f"confirm_{order_id}"),
+                InlineKeyboardButton("❌ رد", callback_data=f"reject_{order_id}"),
+            ]
+        ])
+    else:
+        # پلنی در حافظه نیست (مثلاً ربات ری‌استارت شده). رسید را از دست نمی‌دهیم و برای ادمین می‌فرستیم.
+        caption = (
+            "🧾 <b>رسید پرداخت (بدون پلن انتخاب‌شده)</b>\n\n"
+            f"{user_block}"
+            f"{renewal_line}"
+            "⚠️ ربات پلن انتخابی این کاربر را ندارد (احتمالاً ری‌استارت شده). لطفاً مستقیم با کاربر هماهنگ کنید."
+        )
+        admin_keyboard = None
+
+    try:
+        if is_photo:
+            await context.bot.send_photo(
+                chat_id=ADMIN_ID, photo=file_id, caption=caption,
+                parse_mode="HTML", reply_markup=admin_keyboard,
+            )
+        else:
+            await context.bot.send_document(
+                chat_id=ADMIN_ID, document=file_id, caption=caption,
+                parse_mode="HTML", reply_markup=admin_keyboard,
+            )
+    except TelegramError:
+        logger.exception("Failed to forward receipt from user %s to admin", user.id)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 ارتباط با پشتیبانی", url=f"https://t.me/{ADMIN_USERNAME}")],
+        ])
+        await message.reply_text(
+            "⚠️ ارسال رسید به ادمین با مشکل مواجه شد. لطفاً دوباره تلاش کنید یا رسید را به پشتیبانی بفرستید.",
+            reply_markup=keyboard,
         )
         return
 
-    user = update.effective_user
-    photo_file_id = update.message.photo[-1].file_id
-
-    price_text = format_toman(plan["toman"])
-    order_id = create_order(user.id, plan["label"], price_text)
-
-    renewal_username = context.user_data.get("renewal_username")
-    renewal_line = f"🔄 نام کاربری سرور جهت تمدید: `{renewal_username}`\n\n" if renewal_username else ""
-
-    caption = (
-        f"🧾 **رسید پرداخت جدید (سفارش #{order_id})**\n\n"
-        f"👤 کاربر: {user.full_name}\n"
-        f"🆔 آیدی عددی: `{user.id}`\n"
-        f"یوزرنیم: @{user.username if user.username else '---'}\n\n"
-        f"{renewal_line}"
-        f"📦 پلن انتخابی: **{plan['label']}**\n"
-        f"💰 مبلغ: **{price_text}**\n"
-        f"💱 معادل ریالی: **{format_rial(plan['toman'])}**"
-    )
-
-    admin_keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ تایید", callback_data=f"confirm_{order_id}"),
-            InlineKeyboardButton("❌ رد", callback_data=f"reject_{order_id}"),
-        ]
-    ])
-
-    await context.bot.send_photo(
-        chat_id=ADMIN_ID,
-        photo=photo_file_id,
-        caption=caption,
-        parse_mode="Markdown",
-        reply_markup=admin_keyboard,
-    )
-
-    await update.message.reply_text(
+    await message.reply_text(
         "✅ رسید شما با موفقیت دریافت شد و برای ادمین ارسال گردید.\n"
         "به محض تایید، به شما اطلاع داده خواهد شد. لطفاً کمی شکیبا باشید 🙏"
     )
 
     context.user_data.pop("pending_plan", None)
     context.user_data.pop("renewal_username", None)
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Unhandled exception while processing update: %s", update, exc_info=context.error)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "⚠️ مشکلی پیش آمد. لطفاً دوباره تلاش کنید یا به پشتیبانی پیام دهید."
+            )
+        except TelegramError:
+            pass
 
 async def post_init(application: Application):
     await application.bot.set_my_commands([
@@ -578,6 +636,14 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_header("Content-type", "text/plain")
         self.end_headers()
         self.wfile.write(b"OK")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
 
 def start_dummy_server():
     port = int(os.environ.get("PORT", 10000))
@@ -605,13 +671,19 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(CHECK_BALANCE_BUTTON_TEXT)}$"), check_balance_button_handler))
     app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(SUPPORT_BUTTON_TEXT)}$"), support_button_handler))
 
-    app.add_handler(MessageHandler(filters.PHOTO, receipt_handler))
+    app.add_handler(MessageHandler(
+        filters.PHOTO | filters.Document.IMAGE | filters.Document.MimeType("application/pdf"),
+        receipt_handler,
+    ))
 
     # هندلر عمومی متن، برای دریافت نام کاربری تمدید سرور (کمترین اولویت)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, renewal_username_router))
 
+    app.add_error_handler(error_handler)
+
     print("ربات آنلاین شد...")
-    app.run_polling(drop_pending_updates=True)
+    # drop_pending_updates=False: پیام‌هایی که در زمان خاموشی/خوابِ سرور آمده‌اند از بین نروند
+    app.run_polling(drop_pending_updates=False)
 
 if __name__ == "__main__":
     main()
