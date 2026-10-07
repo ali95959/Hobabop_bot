@@ -1,12 +1,14 @@
 import os
 import re
 import html
+import time
+import asyncio
 import logging
-import sqlite3
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 
+import psycopg
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -142,15 +144,35 @@ def build_full_price_list_text() -> str:
     lines.append(f"📢 کانال ما: @{CHANNEL_USERNAME}")
     return "\n".join(lines).strip()
 
-DB_FILE = "orders.db"
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+def _db_execute(query: str, params: tuple = (), fetch: str = None):
+    """اجرای یک کوئری روی Postgres (Neon). یک بار تلاش مجدد برای زمانی که دیتابیس تازه از خواب بیدار می‌شود."""
+    if not DATABASE_URL:
+        raise RuntimeError("متغیر محیطی DATABASE_URL تنظیم نشده است.")
+    last_exc = None
+    for _attempt in range(2):
+        try:
+            with psycopg.connect(DATABASE_URL, connect_timeout=15) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(query, params)
+                    if fetch == "one":
+                        return cur.fetchone()
+                    if fetch == "all":
+                        return cur.fetchall()
+                    return None
+        except psycopg.OperationalError as exc:
+            last_exc = exc
+            logger.warning("DB connection problem, retrying: %s", exc)
+            time.sleep(1)
+    raise last_exc
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute(
+    _db_execute(
         """
         CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
             plan_label TEXT NOT NULL,
             price TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
@@ -158,27 +180,38 @@ def init_db():
         )
         """
     )
-    conn.commit()
-    conn.close()
-
-def create_order(user_id: int, plan_label: str, price: str) -> int:
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.execute(
-        "INSERT INTO orders (user_id, plan_label, price, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
-        (user_id, plan_label, price, datetime.now().strftime("%Y-%m-%d %H:%M")),
+    _db_execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_state (
+            user_id BIGINT PRIMARY KEY,
+            pending_plan_id TEXT,
+            renewal_username TEXT,
+            updated_at TEXT
+        )
+        """
     )
-    conn.commit()
-    order_id = cur.lastrowid
-    conn.close()
-    return order_id
 
-def get_order(order_id: int):
-    conn = sqlite3.connect(DB_FILE)
-    row = conn.execute(
-        "SELECT id, user_id, plan_label, price, status, created_at FROM orders WHERE id = ?",
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+# ---------- سفارش‌ها ----------
+async def create_order(user_id: int, plan_label: str, price: str) -> int:
+    row = await asyncio.to_thread(
+        _db_execute,
+        "INSERT INTO orders (user_id, plan_label, price, status, created_at) "
+        "VALUES (%s, %s, %s, 'pending', %s) RETURNING id",
+        (user_id, plan_label, price, _now()),
+        "one",
+    )
+    return row[0]
+
+async def get_order(order_id: int):
+    row = await asyncio.to_thread(
+        _db_execute,
+        "SELECT id, user_id, plan_label, price, status, created_at FROM orders WHERE id = %s",
         (order_id,),
-    ).fetchone()
-    conn.close()
+        "one",
+    )
     if not row:
         return None
     return {
@@ -190,20 +223,74 @@ def get_order(order_id: int):
         "created_at": row[5],
     }
 
-def set_order_status(order_id: int, status: str):
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_id))
-    conn.commit()
-    conn.close()
+async def set_order_status(order_id: int, status: str):
+    await asyncio.to_thread(
+        _db_execute, "UPDATE orders SET status = %s WHERE id = %s", (status, order_id)
+    )
 
-def get_user_orders(user_id: int, status: str = "confirmed"):
-    conn = sqlite3.connect(DB_FILE)
-    rows = conn.execute(
-        "SELECT plan_label, price, created_at FROM orders WHERE user_id = ? AND status = ? ORDER BY id DESC",
+async def get_user_orders(user_id: int, status: str = "confirmed"):
+    return await asyncio.to_thread(
+        _db_execute,
+        "SELECT plan_label, price, created_at FROM orders WHERE user_id = %s AND status = %s ORDER BY id DESC",
         (user_id, status),
-    ).fetchall()
-    conn.close()
-    return rows
+        "all",
+    )
+
+# ---------- حالت موقت کاربر (پلن در انتظار پرداخت / نام کاربری تمدید) ----------
+# این توابع هیچ‌وقت خطا پرتاب نمی‌کنند تا مشکل دیتابیس باعث از کار افتادن منوها نشود.
+async def save_pending_plan(user_id: int, plan_id: str):
+    try:
+        await asyncio.to_thread(
+            _db_execute,
+            "INSERT INTO user_state (user_id, pending_plan_id, updated_at) VALUES (%s, %s, %s) "
+            "ON CONFLICT (user_id) DO UPDATE SET pending_plan_id = EXCLUDED.pending_plan_id, "
+            "updated_at = EXCLUDED.updated_at",
+            (user_id, plan_id, _now()),
+        )
+    except Exception:
+        logger.exception("save_pending_plan failed for user %s", user_id)
+
+async def save_renewal_username(user_id: int, username: str):
+    try:
+        await asyncio.to_thread(
+            _db_execute,
+            "INSERT INTO user_state (user_id, renewal_username, updated_at) VALUES (%s, %s, %s) "
+            "ON CONFLICT (user_id) DO UPDATE SET renewal_username = EXCLUDED.renewal_username, "
+            "updated_at = EXCLUDED.updated_at",
+            (user_id, username, _now()),
+        )
+    except Exception:
+        logger.exception("save_renewal_username failed for user %s", user_id)
+
+async def clear_pending_plan(user_id: int):
+    try:
+        await asyncio.to_thread(
+            _db_execute,
+            "UPDATE user_state SET pending_plan_id = NULL, updated_at = %s WHERE user_id = %s",
+            (_now(), user_id),
+        )
+    except Exception:
+        logger.exception("clear_pending_plan failed for user %s", user_id)
+
+async def get_user_state(user_id: int):
+    """(pending_plan_id, renewal_username) را برمی‌گرداند."""
+    try:
+        row = await asyncio.to_thread(
+            _db_execute,
+            "SELECT pending_plan_id, renewal_username FROM user_state WHERE user_id = %s",
+            (user_id,),
+            "one",
+        )
+        return (row[0], row[1]) if row else (None, None)
+    except Exception:
+        logger.exception("get_user_state failed for user %s", user_id)
+        return (None, None)
+
+async def delete_user_state(user_id: int):
+    try:
+        await asyncio.to_thread(_db_execute, "DELETE FROM user_state WHERE user_id = %s", (user_id,))
+    except Exception:
+        logger.exception("delete_user_state failed for user %s", user_id)
 
 def build_my_services_text(orders) -> str:
     if not orders:
@@ -271,14 +358,16 @@ def subcat_keyboard(cat_key: str, sub_key: str):
     buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data=f"cat_{cat_key}")])
     return InlineKeyboardMarkup(buttons)
 
-def reset_transient_state(context: ContextTypes.DEFAULT_TYPE):
+async def reset_transient_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """هرگونه حالت موقتِ در انتظار پاسخ (پلن در انتظار پرداخت، در انتظار نام کاربری) را پاک می‌کند."""
     context.user_data.pop("pending_plan", None)
     context.user_data.pop("awaiting_username", None)
     context.user_data.pop("username_attempts", None)
+    if update.effective_user:
+        await clear_pending_plan(update.effective_user.id)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    reset_transient_state(context)
+    await reset_transient_state(update, context)
     await update.message.reply_text(
         "سلام! به ربات حباب خوش آمدید 😉\nجهت خرید یا تمدید سرور OpenConnect در خدمتیم.",
         reply_markup=PERSISTENT_KEYBOARD,
@@ -289,7 +378,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def home_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    reset_transient_state(context)
+    await reset_transient_state(update, context)
     await update.message.reply_text(
         "🏠 منوی اصلی:",
         reply_markup=main_menu_keyboard(),
@@ -300,7 +389,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.get("pending_plan") is not None
         or context.user_data.get("awaiting_username") is True
     )
-    reset_transient_state(context)
+    await reset_transient_state(update, context)
     text = (
         "❌ فرآیند جاری لغو شد و از آن خارج شدید."
         if had_active_flow
@@ -313,7 +402,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def start_renewal_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, via_callback: bool):
-    reset_transient_state(context)
+    await reset_transient_state(update, context)
     context.user_data["awaiting_username"] = True
     context.user_data["username_attempts"] = 0
 
@@ -333,7 +422,7 @@ async def start_renewal_flow(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=PERSISTENT_KEYBOARD)
 
 async def buy_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    reset_transient_state(context)
+    await reset_transient_state(update, context)
     await update.message.reply_text(
         "🛒 **بخش خرید اشتراک**\n\nلطفاً نوع اشتراک مورد نظر خود را انتخاب کنید یا لیست کلی قیمت‌ها را ببینید:",
         parse_mode="Markdown",
@@ -341,7 +430,7 @@ async def buy_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 async def price_list_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    reset_transient_state(context)
+    await reset_transient_state(update, context)
     await update.message.reply_text(
         build_full_price_list_text(),
         parse_mode="Markdown",
@@ -352,12 +441,12 @@ async def renew_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     await start_renewal_flow(update, context, via_callback=False)
 
 async def my_services_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    reset_transient_state(context)
-    orders = get_user_orders(update.effective_user.id, status="confirmed")
+    await reset_transient_state(update, context)
+    orders = await get_user_orders(update.effective_user.id, status="confirmed")
     await update.message.reply_text(build_my_services_text(orders), parse_mode="Markdown")
 
 async def check_balance_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    reset_transient_state(context)
+    await reset_transient_state(update, context)
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 چک کردن مانده", url=f"https://t.me/{BALANCE_BOT_USERNAME}")],
     ])
@@ -367,7 +456,7 @@ async def check_balance_button_handler(update: Update, context: ContextTypes.DEF
     )
 
 async def support_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    reset_transient_state(context)
+    await reset_transient_state(update, context)
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("💬 ارتباط با پشتیبانی", url=f"https://t.me/{ADMIN_USERNAME}")],
     ])
@@ -387,6 +476,7 @@ async def renewal_username_router(update: Update, context: ContextTypes.DEFAULT_
         context.user_data["awaiting_username"] = False
         context.user_data["username_attempts"] = 0
         context.user_data["renewal_username"] = username
+        await save_renewal_username(update.effective_user.id, username)
         await update.message.reply_text(
             f"✅ نام کاربری شما با موفقیت تایید شد! (`{username}`)",
             parse_mode="Markdown",
@@ -480,6 +570,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         context.user_data["pending_plan"] = plan
+        await save_pending_plan(query.from_user.id, plan_id)
 
         renewal_username = context.user_data.get("renewal_username")
         renewal_note = (
@@ -510,7 +601,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "my_services":
-        orders = get_user_orders(query.from_user.id, status="confirmed")
+        orders = await get_user_orders(query.from_user.id, status="confirmed")
         text = build_my_services_text(orders)
         keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data="back")]]
         await query.edit_message_text(
@@ -540,7 +631,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "back":
-        reset_transient_state(context)
+        await reset_transient_state(update, context)
         await query.edit_message_text("🏠 منوی اصلی:", reply_markup=main_menu_keyboard())
 
     elif data.startswith("confirm_") or data.startswith("reject_"):
@@ -550,7 +641,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         action, order_id_str = data.split("_", 1)
         order_id = int(order_id_str)
-        order = get_order(order_id)
+        order = await get_order(order_id)
         # caption_html: قالب‌بندی اصلی حفظ می‌شود و نام/یوزرنیم کاربر دوباره پارس نمی‌شود
         old_caption = query.message.caption_html or ""
 
@@ -561,11 +652,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if action == "confirm":
-            set_order_status(order_id, "confirmed")
+            await set_order_status(order_id, "confirmed")
             user_text = "✅ پرداخت شما تایید شد! سرویس شما فعال گردید و در بخش «📦 سرویس‌های من» قابل مشاهده است."
             suffix = "\n\n✅ <b>تایید شد</b>"
         else:
-            set_order_status(order_id, "rejected")
+            await set_order_status(order_id, "rejected")
             user_text = "❌ رسید ارسالی تایید نشد. لطفاً با پشتیبانی در تماس باشید یا رسید صحیح را مجدداً ارسال کنید."
             suffix = "\n\n❌ <b>رد شد</b>"
 
@@ -594,6 +685,14 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     plan = context.user_data.get("pending_plan")
     renewal_username = context.user_data.get("renewal_username")
 
+    # بعد از ری‌استارت سرور حافظه‌ی RAM خالی است؛ پلن و نام کاربری را از دیتابیس بازیابی می‌کنیم
+    if plan is None or renewal_username is None:
+        db_plan_id, db_renewal = await get_user_state(user.id)
+        if plan is None and db_plan_id:
+            _, _, plan = find_plan(db_plan_id)
+        if renewal_username is None:
+            renewal_username = db_renewal
+
     # تمام متن‌های وارد‌شده توسط کاربر escape می‌شوند تا پارس HTML خطا ندهد
     safe_name = html.escape(user.full_name or "---")
     safe_username = html.escape(user.username) if user.username else "---"
@@ -607,9 +706,18 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"یوزرنیم: @{safe_username}\n\n"
     )
 
+    order_id = None
+    db_failed = False
     if plan:
         price_text = format_toman(plan["toman"])
-        order_id = create_order(user.id, plan["label"], price_text)
+        try:
+            order_id = await create_order(user.id, plan["label"], price_text)
+        except Exception:
+            logger.exception("create_order failed for user %s", user.id)
+            db_failed = True
+
+    admin_keyboard = None
+    if plan and order_id is not None:
         caption = (
             f"🧾 <b>رسید پرداخت جدید (سفارش #{order_id})</b>\n\n"
             f"{user_block}"
@@ -624,15 +732,23 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("❌ رد", callback_data=f"reject_{order_id}"),
             ]
         ])
+    elif plan and db_failed:
+        # دیتابیس خطا داد؛ رسید را از دست نمی‌دهیم و بدون دکمه‌ی تایید برای ادمین می‌فرستیم
+        caption = (
+            "🧾 <b>رسید پرداخت (خطای دیتابیس)</b>\n\n"
+            f"{user_block}"
+            f"{renewal_line}"
+            f"📦 پلن انتخابی: <b>{html.escape(plan['label'])}</b>\n"
+            f"💰 مبلغ: <b>{price_text}</b>\n\n"
+            "⚠️ ثبت سفارش در دیتابیس انجام نشد، لطفاً دستی پیگیری کنید."
+        )
     else:
-        # پلنی در حافظه نیست (مثلاً ربات ری‌استارت شده). رسید را از دست نمی‌دهیم و برای ادمین می‌فرستیم.
         caption = (
             "🧾 <b>رسید پرداخت (بدون پلن انتخاب‌شده)</b>\n\n"
             f"{user_block}"
             f"{renewal_line}"
-            "⚠️ ربات پلن انتخابی این کاربر را ندارد (احتمالاً ری‌استارت شده). لطفاً مستقیم با کاربر هماهنگ کنید."
+            "⚠️ پلن انتخابی این کاربر پیدا نشد. لطفاً مستقیم با کاربر هماهنگ کنید."
         )
-        admin_keyboard = None
 
     try:
         if is_photo:
@@ -663,6 +779,7 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data.pop("pending_plan", None)
     context.user_data.pop("renewal_username", None)
+    await delete_user_state(user.id)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Unhandled exception while processing update: %s", update, exc_info=context.error)
