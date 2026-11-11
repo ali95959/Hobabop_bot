@@ -455,13 +455,7 @@ async def get_user_services_text(user_id: int) -> str:
         (user_id,),
         "all",
     )
-    recent_orders = await asyncio.to_thread(
-        _db_execute,
-        "SELECT id, plan_label, status, created_ts FROM orders WHERE user_id = %s ORDER BY id DESC LIMIT 5",
-        (user_id,),
-        "all",
-    )
-    return build_my_services_text(service_rows or [], recent_orders or [])
+    return build_my_services_text(service_rows or [])
 
 # ---------- حالت موقت کاربر (پلن در انتظار پرداخت / نام کاربری تمدید) ----------
 # این توابع هیچ‌وقت خطا پرتاب نمی‌کنند تا مشکل دیتابیس باعث از کار افتادن منوها نشود.
@@ -554,43 +548,35 @@ def build_services_from_orders(rows) -> list:
     services.sort(key=lambda s: s["expires_at"] or datetime.min, reverse=True)
     return services
 
-def build_my_services_text(service_rows, recent_orders) -> str:
-    """متن «سرویس‌های من» (HTML): سرویس‌ها با نام کاربری و تاریخ انقضای شمسی + وضعیت آخرین سفارش‌ها."""
-    services = build_services_from_orders(service_rows)
+def build_my_services_text(service_rows) -> str:
+    """متن «سرویس‌های من» (HTML): فقط سرویس‌های فعال، شماره‌گذاری از ۱، با نام کاربری و تاریخ انقضای شمسی."""
     now = now_dt()
-    lines = []
-    if services:
-        lines.append("📦 <b>سرویس‌های شما:</b>\n")
-        for s in services:
-            if s["username"]:
-                lines.append(f"👤 نام کاربری: <code>{html.escape(s['username'])}</code>")
-            else:
-                lines.append("👤 نام کاربری: هنوز ثبت نشده (با اولین تمدید ثبت می‌شود)")
-            lines.append(f"📋 پلن: {html.escape(s['plan_label'])}")
-            exp = s["expires_at"]
-            if exp is None:
-                lines.append("📅 تاریخ انقضا: نامشخص")
-            elif exp > now:
-                days_left = max(1, math.ceil((exp - now).total_seconds() / 86400))
-                lines.append(
-                    f"📅 تاریخ انقضا: {format_jalali_date(exp)} ({to_persian_digits(str(days_left))} روز مانده)"
-                )
-                lines.append("✅ وضعیت: فعال")
-            else:
-                lines.append(f"📅 تاریخ انقضا: {format_jalali_date(exp)}")
-                lines.append("⛔️ وضعیت: منقضی شده — برای ادامه از «🔄 تمدید سرور» استفاده کنید")
-            lines.append("")
-    else:
-        lines.append("📦 هنوز سرویس فعالی برای این حساب ثبت نشده است.\n")
-    if recent_orders:
-        status_text = {"pending": "⏳ در انتظار بررسی", "confirmed": "✅ تایید شده", "rejected": "❌ رد شده"}
-        lines.append("🧾 <b>وضعیت آخرین سفارش‌ها:</b>\n")
-        for oid, plan_label, status, created_ts in recent_orders:
-            lines.append(
-                f"#{to_persian_digits(str(oid))} — {html.escape(plan_label)} — "
-                f"{format_jalali_date(created_ts)} — {status_text.get(status, html.escape(str(status)))}"
-            )
+    active = [
+        s for s in build_services_from_orders(service_rows)
+        if s["expires_at"] is not None and s["expires_at"] > now
+    ]
+    if not active:
+        return "📦 هنوز سرویس فعالی برای این حساب ثبت نشده است."
+    lines = ["📦 <b>سرویس‌های فعال شما:</b>\n"]
+    for number, s in enumerate(active, start=1):
+        days_left = max(1, math.ceil((s["expires_at"] - now).total_seconds() / 86400))
+        lines.append(f"<b>سرویس {to_persian_digits(str(number))}</b>")
+        if s["username"]:
+            lines.append(f"👤 نام کاربری: <code>{html.escape(s['username'])}</code>")
+        else:
+            lines.append("👤 نام کاربری: هنوز ثبت نشده (با اولین تمدید ثبت می‌شود)")
+        lines.append(f"📋 پلن: {html.escape(s['plan_label'])}")
+        lines.append(
+            f"📅 تاریخ انقضا: {format_jalali_date(s['expires_at'])} ({to_persian_digits(str(days_left))} روز مانده)"
+        )
+        lines.append("")
     return "\n".join(lines).strip()
+
+def my_services_keyboard(with_back: bool):
+    rows = [[InlineKeyboardButton("📊 چک کردن مانده", url=f"https://t.me/{BALANCE_BOT_USERNAME}")]]
+    if with_back:
+        rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="back")])
+    return InlineKeyboardMarkup(rows)
 
 def main_menu_keyboard():
     return InlineKeyboardMarkup([
@@ -840,7 +826,7 @@ async def renew_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 async def my_services_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reset_transient_state(update, context)
     text = await get_user_services_text(update.effective_user.id)
-    await update.message.reply_text(text, parse_mode="HTML")
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=my_services_keyboard(with_back=False))
 
 async def check_balance_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reset_transient_state(update, context)
@@ -1036,11 +1022,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "my_services":
         text = await get_user_services_text(query.from_user.id)
-        keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data="back")]]
         await query.edit_message_text(
             text,
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=my_services_keyboard(with_back=True),
         )
 
     elif data == "support":
