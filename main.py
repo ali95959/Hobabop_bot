@@ -58,6 +58,7 @@ PLANS = {
             "m1": {
                 "title": "✨ یک ماهه",
                 "items": [
+                    {"id": "s_m1_10", "label": "یکماه تک کاربر ۱۰ گیگ", "toman": 190},
                     {"id": "s_m1_20", "label": "یکماه تک کاربر ۲۰ گیگ", "toman": 260},
                     {"id": "s_m1_40", "label": "یکماه تک کاربر ۴۰ گیگ", "toman": 420, "recommended": True},
                     {"id": "s_m1_60", "label": "یکماه تک کاربر ۶۰ گیگ", "toman": 550},
@@ -131,28 +132,24 @@ def get_recommended_plans():
                     result.append((cat_key, sub_key, item))
     return result
 
+PRICE_LIST_CATEGORY_TITLES = {"single": "🌀تک کاربره:", "double": "🌀دو کاربره:"}
+PRICE_LIST_SUB_TITLES = {"m1": "✨یک ماهه:", "m3": "✨سه ماهه:"}
+
 def build_full_price_list_text() -> str:
-    lines = [
-        "💎 **لیست کلی تعرفه‌های اشتراک طرح پرو** 💎",
-        "🔥 = پلن پیشنهادی ما",
-        "────────────────────",
-        "",
-    ]
+    """لیست کلی تعرفه‌ها (پیام ساده، بدون Markdown). قیمت‌ها از PLANS خوانده می‌شود تا با /setprice هماهنگ بماند."""
+    lines = ["💵تعرفه های اشتراک های طرح پرو:", ""]
     for cat_key in ("single", "double"):
-        cat = PLANS[cat_key]
-        lines.append(f"📌 **{cat['title']}**")
+        lines.append(PRICE_LIST_CATEGORY_TITLES[cat_key])
         lines.append("")
         for sub_key in ("m1", "m3"):
-            sub = cat["subcats"][sub_key]
-            lines.append(f"  🔹 {sub['title']}:")
-            for item in sub["items"]:
-                mark = "  🔥 (پیشنهادی)" if item.get("recommended") else ""
-                lines.append(f"     • {item['label']} ── 💰 **{format_toman(item['toman'])}**{mark}")
+            lines.append(PRICE_LIST_SUB_TITLES[sub_key])
             lines.append("")
-        lines.append("────────────────────")
-        lines.append("")
-    lines.append(f"📢 کانال ما: @{CHANNEL_USERNAME}")
-    return "\n".join(lines).strip()
+            for item in PLANS[cat_key]["subcats"][sub_key]["items"]:
+                mark = " (پلن پیشنهادی)🔥" if item.get("recommended") else ""
+                lines.append(f"{item['label']} {to_persian_digits(str(item['toman']))} تومن{mark}")
+            lines.append("")
+    lines.append(f"@{CHANNEL_USERNAME}")
+    return "\n".join(lines)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -231,9 +228,13 @@ def init_db():
             ADD COLUMN IF NOT EXISTS receipt_file_id TEXT,
             ADD COLUMN IF NOT EXISTS receipt_is_photo BOOLEAN,
             ADD COLUMN IF NOT EXISTS expiry_reminded BOOLEAN NOT NULL DEFAULT FALSE,
-            ADD COLUMN IF NOT EXISTS admin_reminded BOOLEAN NOT NULL DEFAULT FALSE
+            ADD COLUMN IF NOT EXISTS admin_reminded BOOLEAN NOT NULL DEFAULT FALSE,
+            ADD COLUMN IF NOT EXISTS discount_code TEXT,
+            ADD COLUMN IF NOT EXISTS discount_percent INTEGER,
+            ADD COLUMN IF NOT EXISTS original_toman INTEGER
         """
     )
+    _db_execute("ALTER TABLE user_state ADD COLUMN IF NOT EXISTS discount_code TEXT")
     backfill_orders()
     apply_saved_settings()
 
@@ -244,6 +245,45 @@ DURATION_DAYS = {"m1": 30, "m3": 90}   # مدت هر پلن (کلید زیرمج
 REMINDER_DAYS_BEFORE = 3               # چند روز قبل از پایان سرویس یادآوری برود
 PENDING_REMIND_MINUTES = 30            # بعد از چند دقیقه رسید بی‌جواب به ادمین یادآوری شود
 BACKGROUND_INTERVAL = 3600             # فاصله‌ی اجرای کارهای پس‌زمینه (ثانیه)
+
+# ---------- کد تخفیف ----------
+# کلید هر کد با حروف کوچک و بدون فاصله/خط‌تیره/آندرلاین است (ورودی کاربر با normalize_discount_code هم‌شکل می‌شود).
+# percent: درصد تخفیف بر اساس مدت پلن (m1 = یک‌ماهه، m3 = سه‌ماهه)
+DISCOUNT_CODES = {
+    "blackfriday": {"title": "Black Friday", "percent": {"m1": 15, "m3": 25}},
+}
+
+# ---------- دلایل آماده‌ی رد رسید ----------
+# (متن دکمه برای ادمین, پیامی که برای کاربر فرستاده می‌شود)
+REJECT_REASONS = [
+    ("💰 مبلغ نامطابق", "مبلغ واریزی با مبلغ سفارش شما مطابقت ندارد. لطفاً مبلغ دقیق را واریز کنید."),
+    ("🖼 رسید ناخوانا", "رسید ارسالی خوانا نیست. لطفاً تصویر واضح‌تری از رسید ارسال کنید."),
+    ("🔎 واریزی پیدا نشد", "واریزی مربوط به این رسید در حساب ما پیدا نشد. اگر مطمئنید پرداخت انجام شده، به پشتیبانی پیام دهید."),
+    ("♻️ رسید تکراری", "این رسید قبلاً استفاده شده است."),
+    ("💳 کارت مقصد اشتباه", "کارت مقصد در رسید با شماره کارتی که ربات اعلام کرده مطابقت ندارد."),
+]
+
+def normalize_discount_code(text: str) -> str:
+    return re.sub(r"[\s_\-]+", "", (text or "").strip().lower())
+
+def discount_percent_for(code_key, plan_id: str) -> int:
+    """درصد تخفیف این کد روی این پلن؛ ۰ یعنی کد نامعتبر است یا شامل این پلن نمی‌شود."""
+    code = DISCOUNT_CODES.get(code_key or "")
+    if not code:
+        return 0
+    _, sub_key, _ = find_plan(plan_id)
+    return code["percent"].get(sub_key, 0)
+
+def apply_discount(toman: int, percent: int) -> int:
+    """قیمت بعد از تخفیف؛ اعشار به‌صورت گردشده (۰٫۵ به بالا) به عدد صحیح تبدیل می‌شود."""
+    return (toman * (100 - percent) + 50) // 100
+
+def checkout_price(plan: dict, code_key):
+    """(مبلغ نهایی, درصد تخفیف)؛ بدون کد معتبر درصد صفر است و مبلغ همان قیمت پلن."""
+    percent = discount_percent_for(code_key, plan["id"])
+    if percent:
+        return apply_discount(plan["toman"], percent), percent
+    return plan["toman"], 0
 
 def now_dt() -> datetime:
     """زمان فعلی به وقت تهران (بدون tzinfo)؛ مستقل از ساعت سرور."""
@@ -274,6 +314,13 @@ def gregorian_to_jalali(gy: int, gm: int, gd: int):
         jm = 7 + (days - 186) // 30
         jd = 1 + (days - 186) % 30
     return jy, jm, jd
+
+def format_jalali_date(dt) -> str:
+    """تاریخ شمسی (مثلاً ۱۴۰۵/۰۸/۲۰) از یک datetime؛ اگر مقدار خالی بود «---»."""
+    if not dt:
+        return "---"
+    jy, jm, jd = gregorian_to_jalali(dt.year, dt.month, dt.day)
+    return to_persian_digits(f"{jy:04d}/{jm:02d}/{jd:02d}")
 
 def backfill_orders():
     """سفارش‌های قدیمی (قبل از این نسخه) را با فیلدهای جدید کامل می‌کند؛ فقط یک بار برای هر سفارش اجرا می‌شود."""
@@ -333,14 +380,17 @@ async def set_setting(key: str, value: str):
 async def create_order(
     user_id: int, plan_label: str, price: str, amount_toman: int, duration_days: int,
     renewal_username, receipt_file_id, receipt_is_photo: bool,
+    discount_code=None, discount_percent=None, original_toman=None,
 ) -> int:
     row = await asyncio.to_thread(
         _db_execute,
         "INSERT INTO orders (user_id, plan_label, price, status, created_at, created_ts, amount_toman, "
-        "duration_days, renewal_username, receipt_file_id, receipt_is_photo) "
-        "VALUES (%s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        "duration_days, renewal_username, receipt_file_id, receipt_is_photo, "
+        "discount_code, discount_percent, original_toman) "
+        "VALUES (%s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
         (user_id, plan_label, price, _now(), now_dt(), amount_toman, duration_days,
-         renewal_username, receipt_file_id, receipt_is_photo),
+         renewal_username, receipt_file_id, receipt_is_photo,
+         discount_code, discount_percent, original_toman),
         "one",
     )
     return row[0]
@@ -369,9 +419,10 @@ async def set_order_status(order_id: int, status: str):
         _db_execute, "UPDATE orders SET status = %s WHERE id = %s", (status, order_id)
     )
 
-async def finalize_order(order_id: int, status: str, duration_days=None) -> bool:
+async def finalize_order(order_id: int, status: str, duration_days=None):
     """وضعیت سفارش را فقط در صورتی که هنوز pending باشد تغییر می‌دهد (جلوگیری از تایید/رد دوباره).
-    در صورت تایید، تاریخ تایید و تاریخ پایان سرویس هم ثبت می‌شود."""
+    در صورت تایید، تاریخ تایید و تاریخ پایان سرویس هم ثبت می‌شود.
+    خروجی: (تغییر کرد یا نه, تاریخ پایان سرویس یا None)."""
     now = now_dt()
     confirmed = status == "confirmed"
     expires = now + timedelta(days=duration_days or 30) if confirmed else None
@@ -382,15 +433,35 @@ async def finalize_order(order_id: int, status: str, duration_days=None) -> bool
         (status, now if confirmed else None, expires, order_id),
         "one",
     )
-    return row is not None
+    if row is None:
+        return False, None
+    return True, expires
 
-async def get_user_orders(user_id: int, status: str = "confirmed"):
-    return await asyncio.to_thread(
+async def get_latest_pending_order(user_id: int):
+    """آخرین سفارش بررسی‌نشده‌ی کاربر: (id, plan_label) یا None."""
+    row = await asyncio.to_thread(
         _db_execute,
-        "SELECT plan_label, price, created_at FROM orders WHERE user_id = %s AND status = %s ORDER BY id DESC",
-        (user_id, status),
+        "SELECT id, plan_label FROM orders WHERE user_id = %s AND status = 'pending' ORDER BY id DESC LIMIT 1",
+        (user_id,),
+        "one",
+    )
+    return (row[0], row[1]) if row else None
+
+async def get_user_services_text(user_id: int) -> str:
+    service_rows = await asyncio.to_thread(
+        _db_execute,
+        "SELECT plan_label, renewal_username, expires_at FROM orders "
+        "WHERE user_id = %s AND status = 'confirmed' ORDER BY id ASC",
+        (user_id,),
         "all",
     )
+    recent_orders = await asyncio.to_thread(
+        _db_execute,
+        "SELECT id, plan_label, status, created_ts FROM orders WHERE user_id = %s ORDER BY id DESC LIMIT 5",
+        (user_id,),
+        "all",
+    )
+    return build_my_services_text(service_rows or [], recent_orders or [])
 
 # ---------- حالت موقت کاربر (پلن در انتظار پرداخت / نام کاربری تمدید) ----------
 # این توابع هیچ‌وقت خطا پرتاب نمی‌کنند تا مشکل دیتابیس باعث از کار افتادن منوها نشود.
@@ -398,9 +469,9 @@ async def save_pending_plan(user_id: int, plan_id: str):
     try:
         await asyncio.to_thread(
             _db_execute,
-            "INSERT INTO user_state (user_id, pending_plan_id, updated_at) VALUES (%s, %s, %s) "
+            "INSERT INTO user_state (user_id, pending_plan_id, discount_code, updated_at) VALUES (%s, %s, NULL, %s) "
             "ON CONFLICT (user_id) DO UPDATE SET pending_plan_id = EXCLUDED.pending_plan_id, "
-            "updated_at = EXCLUDED.updated_at",
+            "discount_code = NULL, updated_at = EXCLUDED.updated_at",
             (user_id, plan_id, _now()),
         )
     except Exception:
@@ -418,29 +489,41 @@ async def save_renewal_username(user_id: int, username: str):
     except Exception:
         logger.exception("save_renewal_username failed for user %s", user_id)
 
+async def save_discount_code(user_id: int, code_key):
+    try:
+        await asyncio.to_thread(
+            _db_execute,
+            "INSERT INTO user_state (user_id, discount_code, updated_at) VALUES (%s, %s, %s) "
+            "ON CONFLICT (user_id) DO UPDATE SET discount_code = EXCLUDED.discount_code, "
+            "updated_at = EXCLUDED.updated_at",
+            (user_id, code_key, _now()),
+        )
+    except Exception:
+        logger.exception("save_discount_code failed for user %s", user_id)
+
 async def clear_pending_plan(user_id: int):
     try:
         await asyncio.to_thread(
             _db_execute,
-            "UPDATE user_state SET pending_plan_id = NULL, updated_at = %s WHERE user_id = %s",
+            "UPDATE user_state SET pending_plan_id = NULL, discount_code = NULL, updated_at = %s WHERE user_id = %s",
             (_now(), user_id),
         )
     except Exception:
         logger.exception("clear_pending_plan failed for user %s", user_id)
 
 async def get_user_state(user_id: int):
-    """(pending_plan_id, renewal_username) را برمی‌گرداند."""
+    """(pending_plan_id, renewal_username, discount_code) را برمی‌گرداند."""
     try:
         row = await asyncio.to_thread(
             _db_execute,
-            "SELECT pending_plan_id, renewal_username FROM user_state WHERE user_id = %s",
+            "SELECT pending_plan_id, renewal_username, discount_code FROM user_state WHERE user_id = %s",
             (user_id,),
             "one",
         )
-        return (row[0], row[1]) if row else (None, None)
+        return (row[0], row[1], row[2]) if row else (None, None, None)
     except Exception:
         logger.exception("get_user_state failed for user %s", user_id)
-        return (None, None)
+        return (None, None, None)
 
 async def delete_user_state(user_id: int):
     try:
@@ -448,13 +531,66 @@ async def delete_user_state(user_id: int):
     except Exception:
         logger.exception("delete_user_state failed for user %s", user_id)
 
-def build_my_services_text(orders) -> str:
-    if not orders:
-        return "📦 هنوز سرویس فعالی برای این حساب ثبت نشده است."
-    lines = ["📦 **سرویس‌های فعال شما:**\n"]
-    for plan_label, price, created_at in orders:
-        lines.append(f"✅ **{plan_label}** — {price}\n🗓 تاریخ خرید: {created_at}\n")
-    return "\n".join(lines)
+def build_services_from_orders(rows) -> list:
+    """از سفارش‌های تاییدشده (قدیمی به جدید) فهرست سرویس‌ها را می‌سازد.
+    rows: (plan_label, renewal_username, expires_at)
+    - سفارش‌هایی که نام کاربری سرور یکسان دارند یک سرویس حساب می‌شوند و هر تمدید همان سرویس را به‌روز می‌کند.
+    - خرید اولِ بدون نام کاربری، با اولین تمدیدی که نام کاربری اعلام کند به همان سرویس می‌پیوندد."""
+    named = {}
+    unnamed = []
+    for plan_label, username, expires_at in rows:
+        entry = {"username": username, "plan_label": plan_label, "expires_at": expires_at}
+        if username:
+            key = username.lower()
+            if key in named:
+                named[key].update(plan_label=plan_label, expires_at=expires_at)
+            else:
+                if unnamed:
+                    unnamed.pop(0)
+                named[key] = entry
+        else:
+            unnamed.append(entry)
+    services = list(named.values()) + unnamed
+    services.sort(key=lambda s: s["expires_at"] or datetime.min, reverse=True)
+    return services
+
+def build_my_services_text(service_rows, recent_orders) -> str:
+    """متن «سرویس‌های من» (HTML): سرویس‌ها با نام کاربری و تاریخ انقضای شمسی + وضعیت آخرین سفارش‌ها."""
+    services = build_services_from_orders(service_rows)
+    now = now_dt()
+    lines = []
+    if services:
+        lines.append("📦 <b>سرویس‌های شما:</b>\n")
+        for s in services:
+            if s["username"]:
+                lines.append(f"👤 نام کاربری: <code>{html.escape(s['username'])}</code>")
+            else:
+                lines.append("👤 نام کاربری: هنوز ثبت نشده (با اولین تمدید ثبت می‌شود)")
+            lines.append(f"📋 پلن: {html.escape(s['plan_label'])}")
+            exp = s["expires_at"]
+            if exp is None:
+                lines.append("📅 تاریخ انقضا: نامشخص")
+            elif exp > now:
+                days_left = max(1, math.ceil((exp - now).total_seconds() / 86400))
+                lines.append(
+                    f"📅 تاریخ انقضا: {format_jalali_date(exp)} ({to_persian_digits(str(days_left))} روز مانده)"
+                )
+                lines.append("✅ وضعیت: فعال")
+            else:
+                lines.append(f"📅 تاریخ انقضا: {format_jalali_date(exp)}")
+                lines.append("⛔️ وضعیت: منقضی شده — برای ادامه از «🔄 تمدید سرور» استفاده کنید")
+            lines.append("")
+    else:
+        lines.append("📦 هنوز سرویس فعالی برای این حساب ثبت نشده است.\n")
+    if recent_orders:
+        status_text = {"pending": "⏳ در انتظار بررسی", "confirmed": "✅ تایید شده", "rejected": "❌ رد شده"}
+        lines.append("🧾 <b>وضعیت آخرین سفارش‌ها:</b>\n")
+        for oid, plan_label, status, created_ts in recent_orders:
+            lines.append(
+                f"#{to_persian_digits(str(oid))} — {html.escape(plan_label)} — "
+                f"{format_jalali_date(created_ts)} — {status_text.get(status, html.escape(str(status)))}"
+            )
+    return "\n".join(lines).strip()
 
 def main_menu_keyboard():
     return InlineKeyboardMarkup([
@@ -514,11 +650,117 @@ def subcat_keyboard(cat_key: str, sub_key: str):
     buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data=f"cat_{cat_key}")])
     return InlineKeyboardMarkup(buttons)
 
+# ---------- پرداخت و کد تخفیف ----------
+async def resolve_checkout_state(user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """(پلن انتخابی, نام کاربری تمدید, کلید کد تخفیف) را برمی‌گرداند؛
+    اگر حافظه‌ی RAM بعد از ری‌استارت خالی بود از دیتابیس می‌خواند."""
+    plan = context.user_data.get("pending_plan")
+    renewal_username = context.user_data.get("renewal_username")
+    code_key = context.user_data.get("discount_code")
+    if plan is None or renewal_username is None or code_key is None:
+        db_plan_id, db_renewal, db_code = await get_user_state(user_id)
+        if plan is None and db_plan_id:
+            _, _, plan = find_plan(db_plan_id)
+        if renewal_username is None:
+            renewal_username = db_renewal
+        if code_key is None:
+            code_key = db_code
+    return plan, renewal_username, code_key
+
+def plan_notes(plan: dict, renewal_username) -> str:
+    renewal_note = (
+        f"🔄 **نام کاربری جهت تمدید:** `{renewal_username}`\n\n" if renewal_username else ""
+    )
+    recommended_note = (
+        "🔥 **انتخاب عالی! این یکی از پلن‌های پیشنهادی ماست.**\n\n" if plan.get("recommended") else ""
+    )
+    return f"{renewal_note}{recommended_note}"
+
+def build_payment_text(plan: dict, renewal_username, code_key) -> str:
+    """صفحه‌ی پرداخت (Markdown). اگر کد تخفیف معتبر باشد، قیمت اصلی و قیمت جدید هر دو نشان داده می‌شود."""
+    final, percent = checkout_price(plan, code_key)
+    if percent:
+        title = DISCOUNT_CODES[code_key]["title"]
+        price_part = (
+            f"🏷 **کد تخفیف «{title}» با موفقیت اعمال شد** 🎉\n\n"
+            f"✅ **پلن انتخابی:** {plan['label']}\n"
+            f"💰 **قیمت اصلی:** {format_toman(plan['toman'])}\n"
+            f"🎁 **تخفیف {to_persian_digits(str(percent))}٪:** {format_toman(plan['toman'] - final)}\n"
+            f"💵 **قیمت جدید (مبلغ قابل پرداخت):** {format_toman(final)}\n"
+            f"💱 **معادل ریالی:** {format_rial(final)}\n\n"
+            f"⚠️ **لطفاً دقت کنید:** مبلغ جدید یعنی {format_toman(final)} را واریز کنید، نه قیمت اصلی."
+        )
+    else:
+        price_part = (
+            f"✅ **پلن انتخابی:** {plan['label']}\n"
+            f"💰 **مبلغ:** {format_toman(plan['toman'])}\n"
+            f"💱 **معادل ریالی:** {format_rial(plan['toman'])}"
+        )
+    return (
+        f"{plan_notes(plan, renewal_username)}"
+        f"{price_part}\n\n"
+        f"────────────────────\n"
+        f"💳 **شماره کارت جهت واریز:**\n"
+        f"`{CARD_NUMBER}`\n"
+        f"_(روی شماره کارت بزنید تا کپی شود)_\n"
+        f"👤 **به نام:** {CARD_HOLDER}\n"
+        f"────────────────────\n\n"
+        f"📸 لطفاً بعد از واریز، **عکس رسید پرداخت** را همینجا ارسال کنید تا سریعاً بررسی و تایید شود."
+    )
+
+def payment_keyboard(plan: dict):
+    cat_key, sub_key, _ = find_plan(plan["id"])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data=f"sub_{cat_key}_{sub_key}")]])
+
+def plan_missing_keyboard():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🛒 انتخاب پلن", callback_data="plans")]])
+
+async def handle_discount_code_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """کاربر در مرحله‌ی «وارد کردن کد تخفیف» یک متن فرستاده است."""
+    user_id = update.effective_user.id
+    plan, renewal_username, _ = await resolve_checkout_state(user_id, context)
+    if plan is None:
+        context.user_data["awaiting_discount"] = False
+        await update.message.reply_text(
+            "⚠️ پلن انتخابی پیدا نشد؛ لطفاً دوباره پلن را انتخاب کنید.",
+            reply_markup=plan_missing_keyboard(),
+        )
+        return
+
+    code_key = normalize_discount_code(update.message.text)
+    percent = discount_percent_for(code_key, plan["id"])
+    if not percent:
+        if code_key in DISCOUNT_CODES:
+            msg = "❌ این کد تخفیف برای این پلن قابل استفاده نیست."
+        else:
+            msg = "❌ کد تخفیف نامعتبر است."
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💳 ادامه به پرداخت (بدون کد تخفیف)", callback_data="pay_nodisc")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data=f"buy_{plan['id']}")],
+        ])
+        await update.message.reply_text(
+            msg + "\n\nمی‌توانید کد دیگری بفرستید یا بدون کد تخفیف ادامه دهید:",
+            reply_markup=keyboard,
+        )
+        return  # همچنان منتظر کد می‌مانیم
+
+    context.user_data["pending_plan"] = plan
+    context.user_data["awaiting_discount"] = False
+    context.user_data["discount_code"] = code_key
+    await save_discount_code(user_id, code_key)
+    await update.message.reply_text(
+        build_payment_text(plan, renewal_username, code_key),
+        parse_mode="Markdown",
+        reply_markup=payment_keyboard(plan),
+    )
+
 async def reset_transient_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """هرگونه حالت موقتِ در انتظار پاسخ (پلن در انتظار پرداخت، در انتظار نام کاربری) را پاک می‌کند."""
     context.user_data.pop("pending_plan", None)
     context.user_data.pop("awaiting_username", None)
     context.user_data.pop("username_attempts", None)
+    context.user_data.pop("discount_code", None)
+    context.user_data.pop("awaiting_discount", None)
     if update.effective_user:
         await clear_pending_plan(update.effective_user.id)
 
@@ -589,7 +831,6 @@ async def price_list_button_handler(update: Update, context: ContextTypes.DEFAUL
     await reset_transient_state(update, context)
     await update.message.reply_text(
         build_full_price_list_text(),
-        parse_mode="Markdown",
         reply_markup=price_list_keyboard(),
     )
 
@@ -598,8 +839,8 @@ async def renew_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def my_services_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reset_transient_state(update, context)
-    orders = await get_user_orders(update.effective_user.id, status="confirmed")
-    await update.message.reply_text(build_my_services_text(orders), parse_mode="Markdown")
+    text = await get_user_services_text(update.effective_user.id)
+    await update.message.reply_text(text, parse_mode="HTML")
 
 async def check_balance_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reset_transient_state(update, context)
@@ -622,7 +863,11 @@ async def support_button_handler(update: Update, context: ContextTypes.DEFAULT_T
     )
 
 async def renewal_username_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پیام‌های متنی را در زمانی که ربات منتظر دریافت نام کاربری تمدید سرور است، بررسی می‌کند."""
+    """پیام‌های متنی را در زمانی که ربات منتظر کد تخفیف یا نام کاربری تمدید سرور است، بررسی می‌کند."""
+    if context.user_data.get("awaiting_discount"):
+        await handle_discount_code_input(update, context)
+        return
+
     if not context.user_data.get("awaiting_username"):
         return
 
@@ -714,7 +959,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "all_prices":
         await query.edit_message_text(
             build_full_price_list_text(),
-            parse_mode="Markdown",
             reply_markup=price_list_keyboard(),
         )
 
@@ -726,43 +970,76 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         context.user_data["pending_plan"] = plan
-        await save_pending_plan(query.from_user.id, plan_id)
+        context.user_data.pop("discount_code", None)
+        context.user_data["awaiting_discount"] = False
+        await save_pending_plan(query.from_user.id, plan_id)  # کد تخفیف قبلیِ ذخیره‌شده هم پاک می‌شود
 
         renewal_username = context.user_data.get("renewal_username")
-        renewal_note = (
-            f"🔄 **نام کاربری جهت تمدید:** `{renewal_username}`\n\n" if renewal_username else ""
-        )
-
-        recommended_note = "🔥 **انتخاب عالی! این یکی از پلن‌های پیشنهادی ماست.**\n\n" if plan.get("recommended") else ""
-
         text = (
-            f"{renewal_note}"
-            f"{recommended_note}"
+            f"{plan_notes(plan, renewal_username)}"
             f"✅ **پلن انتخابی:** {plan['label']}\n"
-            f"💰 **مبلغ:** {format_toman(plan['toman'])}\n"
-            f"💱 **معادل ریالی:** {format_rial(plan['toman'])}\n\n"
-            f"────────────────────\n"
-            f"💳 **شماره کارت جهت واریز:**\n"
-            f"`{CARD_NUMBER}`\n"
-            f"_(روی شماره کارت بزنید تا کپی شود)_\n"
-            f"👤 **به نام:** {CARD_HOLDER}\n"
-            f"────────────────────\n\n"
-            f"📸 لطفاً بعد از واریز، **عکس رسید پرداخت** را همینجا ارسال کنید تا سریعاً بررسی و تایید شود."
+            f"💰 **مبلغ:** {format_toman(plan['toman'])}\n\n"
+            "🏷 اگر **کد تخفیف** دارید، قبل از پرداخت آن را وارد کنید؛ "
+            "در غیر این صورت می‌توانید مستقیم به پرداخت بروید 👇"
         )
-        keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data=f"sub_{cat_key}_{sub_key}")]]
+        keyboard = [
+            [InlineKeyboardButton("🏷 وارد کردن کد تخفیف", callback_data="discount_enter")],
+            [InlineKeyboardButton("💳 ادامه به پرداخت (بدون کد تخفیف)", callback_data="pay_nodisc")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sub_{cat_key}_{sub_key}")],
+        ]
         await query.edit_message_text(
             text,
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
+    elif data == "discount_enter":
+        plan, _renewal, _code = await resolve_checkout_state(query.from_user.id, context)
+        if plan is None:
+            await query.edit_message_text(
+                "⚠️ پلن انتخابی پیدا نشد؛ لطفاً دوباره پلن را انتخاب کنید.",
+                reply_markup=plan_missing_keyboard(),
+            )
+            return
+        context.user_data["pending_plan"] = plan
+        context.user_data["awaiting_discount"] = True
+        keyboard = [
+            [InlineKeyboardButton("💳 ادامه به پرداخت (بدون کد تخفیف)", callback_data="pay_nodisc")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data=f"buy_{plan['id']}")],
+        ]
+        await query.edit_message_text(
+            "🏷 **کد تخفیف**\n\n"
+            "لطفاً کد تخفیف خود را همینجا ارسال کنید.\n"
+            "اگر کدی ندارید، روی «ادامه به پرداخت» بزنید.\n\n"
+            "برای انصراف می‌توانید دستور /cancel را ارسال کنید.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    elif data == "pay_nodisc":
+        plan, renewal_username, _code = await resolve_checkout_state(query.from_user.id, context)
+        if plan is None:
+            await query.edit_message_text(
+                "⚠️ پلن انتخابی پیدا نشد؛ لطفاً دوباره پلن را انتخاب کنید.",
+                reply_markup=plan_missing_keyboard(),
+            )
+            return
+        context.user_data["pending_plan"] = plan
+        context.user_data["awaiting_discount"] = False
+        context.user_data.pop("discount_code", None)
+        await save_discount_code(query.from_user.id, None)
+        await query.edit_message_text(
+            build_payment_text(plan, renewal_username, None),
+            parse_mode="Markdown",
+            reply_markup=payment_keyboard(plan),
+        )
+
     elif data == "my_services":
-        orders = await get_user_orders(query.from_user.id, status="confirmed")
-        text = build_my_services_text(orders)
+        text = await get_user_services_text(query.from_user.id)
         keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data="back")]]
         await query.edit_message_text(
             text,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
@@ -790,39 +1067,89 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await reset_transient_state(update, context)
         await query.edit_message_text("🏠 منوی اصلی:", reply_markup=main_menu_keyboard())
 
-    elif data.startswith("confirm_") or data.startswith("reject_"):
+    elif data.startswith(("confirm_", "reject_", "rejr_", "rejb_")):
         if query.from_user.id != ADMIN_ID:
             return
 
-        action, order_id_str = data.split("_", 1)
-        order_id = int(order_id_str)
+        parts = data.split("_")
+        action = parts[0]
+        order_id = int(parts[1])
+
+        if action == "rejb":
+            # برگشت از منوی دلایل رد به دکمه‌های اصلی
+            await query.edit_message_reply_markup(reply_markup=order_action_keyboard(order_id))
+            return
+
         order = await get_order(order_id)
 
         if not order:
             await append_to_admin_message(query, "\n\n⚠️ این سفارش پیدا نشد.")
             return
 
+        if action == "reject":
+            # قبل از رد کردن، دلیل را از ادمین می‌پرسیم
+            if order["status"] != "pending":
+                status_fa = {"confirmed": "تایید", "rejected": "رد"}.get(order["status"], order["status"])
+                await append_to_admin_message(query, f"\n\n⚠️ این سفارش قبلاً {status_fa} شده است.")
+                return
+            await query.edit_message_reply_markup(reply_markup=reject_reasons_keyboard(order_id))
+            return
+
+        reason = None
+        if action == "rejr" and len(parts) > 2 and parts[2].isdigit() and int(parts[2]) < len(REJECT_REASONS):
+            reason = REJECT_REASONS[int(parts[2])][1]
+
         new_status = "confirmed" if action == "confirm" else "rejected"
-        changed = await finalize_order(order_id, new_status, order.get("duration_days"))
+        changed, expires = await finalize_order(order_id, new_status, order.get("duration_days"))
         if not changed:
             status_fa = {"confirmed": "تایید", "rejected": "رد"}.get(order["status"], order["status"])
             await append_to_admin_message(query, f"\n\n⚠️ این سفارش قبلاً {status_fa} شده است.")
             return
 
-        if action == "confirm":
-            user_text = "✅ پرداخت شما تایید شد! سرویس شما فعال گردید و در بخش «📦 سرویس‌های من» قابل مشاهده است."
+        user_markup = None
+        if new_status == "confirmed":
+            user_text = (
+                "✅ پرداخت شما تایید شد! سرویس شما فعال گردید.\n\n"
+                f"🗓 تاریخ تایید: {format_jalali_date(now_dt())}\n"
+                f"📅 تاریخ انقضای سرویس: {format_jalali_date(expires)}\n\n"
+                "جزئیات سرویس در بخش «📦 سرویس‌های من» قابل مشاهده است."
+            )
             suffix = "\n\n✅ <b>تایید شد</b>"
         else:
-            user_text = "❌ رسید ارسالی تایید نشد. لطفاً با پشتیبانی در تماس باشید یا رسید صحیح را مجدداً ارسال کنید."
+            user_text = "❌ رسید ارسالی تایید نشد."
             suffix = "\n\n❌ <b>رد شد</b>"
+            if reason:
+                user_text += f"\n\n📝 دلیل: {reason}"
+                suffix += f"\n📝 دلیل: {html.escape(reason)}"
+            user_text += (
+                "\n\nلطفاً مشکل را برطرف کنید؛ برای ارسال رسید صحیح دوباره پلن را انتخاب کنید "
+                "یا با پشتیبانی در تماس باشید."
+            )
+            user_markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🛒 انتخاب مجدد پلن", callback_data="plans")],
+                [InlineKeyboardButton("💬 ارتباط با پشتیبانی", url=f"https://t.me/{ADMIN_USERNAME}")],
+            ])
 
         try:
-            await context.bot.send_message(chat_id=order["user_id"], text=user_text)
+            await context.bot.send_message(chat_id=order["user_id"], text=user_text, reply_markup=user_markup)
         except TelegramError:
             logger.exception("Could not notify user %s about order %s", order["user_id"], order_id)
             suffix += "\n⚠️ پیام به کاربر ارسال نشد (احتمالاً ربات را بلاک کرده)."
 
         await append_to_admin_message(query, suffix)
+
+
+async def send_receipt_to_admin(bot, file_id: str, is_photo: bool, caption: str, reply_markup=None):
+    if is_photo:
+        await bot.send_photo(
+            chat_id=ADMIN_ID, photo=file_id, caption=caption,
+            parse_mode="HTML", reply_markup=reply_markup,
+        )
+    else:
+        await bot.send_document(
+            chat_id=ADMIN_ID, document=file_id, caption=caption,
+            parse_mode="HTML", reply_markup=reply_markup,
+        )
 
 async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -838,16 +1165,12 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info("Receipt received from user %s (photo=%s)", user.id, is_photo)
 
-    plan = context.user_data.get("pending_plan")
-    renewal_username = context.user_data.get("renewal_username")
+    # آلبوم (چند عکس همزمان) هر عکس را جدا به ربات می‌رساند؛ فقط به اولین عکسِ هر آلبوم جواب می‌دهیم
+    media_group_id = message.media_group_id
+    already_acked = bool(media_group_id) and context.user_data.get("ack_media_group") == media_group_id
 
-    # بعد از ری‌استارت سرور حافظه‌ی RAM خالی است؛ پلن و نام کاربری را از دیتابیس بازیابی می‌کنیم
-    if plan is None or renewal_username is None:
-        db_plan_id, db_renewal = await get_user_state(user.id)
-        if plan is None and db_plan_id:
-            _, _, plan = find_plan(db_plan_id)
-        if renewal_username is None:
-            renewal_username = db_renewal
+    # بعد از ری‌استارت سرور حافظه‌ی RAM خالی است؛ پلن، نام کاربری و کد تخفیف را از دیتابیس بازیابی می‌کنیم
+    plan, renewal_username, code_key = await resolve_checkout_state(user.id, context)
 
     # تمام متن‌های وارد‌شده توسط کاربر escape می‌شوند تا پارس HTML خطا ندهد
     safe_name = html.escape(user.full_name or "---")
@@ -862,20 +1185,68 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"یوزرنیم: @{safe_username}\n\n"
     )
 
+    # رسید اضافه: کاربر پلن در انتظاری ندارد ولی سفارش بررسی‌نشده دارد
+    # (مثلاً آلبوم چندعکسی یا رسید دوم) → به همان سفارش پیوست می‌شود، سفارش جدید ساخته نمی‌شود.
+    if plan is None:
+        pending_order = None
+        try:
+            pending_order = await get_latest_pending_order(user.id)
+        except Exception:
+            logger.exception("get_latest_pending_order failed for user %s", user.id)
+        if pending_order:
+            pending_id, pending_label = pending_order
+            extra_caption = (
+                f"📎 <b>رسید اضافی برای سفارش #{pending_id}</b>\n\n"
+                f"{user_block}"
+                f"📦 پلن سفارش: <b>{html.escape(pending_label)}</b>\n\n"
+                "تایید یا رد سفارش با دکمه‌های پیام اصلی همین سفارش انجام می‌شود."
+            )
+            try:
+                await send_receipt_to_admin(context.bot, file_id, is_photo, extra_caption)
+            except TelegramError:
+                logger.exception("Failed to forward extra receipt from user %s", user.id)
+                if not already_acked:
+                    await message.reply_text(
+                        "⚠️ ارسال رسید اضافی به ادمین با مشکل مواجه شد. لطفاً دوباره تلاش کنید یا به پشتیبانی پیام دهید."
+                    )
+                return
+            if media_group_id:
+                context.user_data["ack_media_group"] = media_group_id
+            if not already_acked:
+                await message.reply_text(
+                    f"📎 رسید اضافی شما هم برای ادمین ارسال شد و به سفارش #{to_persian_digits(str(pending_id))} پیوست شد."
+                )
+            return
+
     order_id = None
     db_failed = False
+    final_toman = 0
+    percent = 0
+    price_text = ""
+    discount_line = ""
     if plan:
-        price_text = format_toman(plan["toman"])
+        final_toman, percent = checkout_price(plan, code_key)
+        price_text = format_toman(final_toman)
+        if percent:
+            discount_line = (
+                f"🏷 کد تخفیف: <b>{html.escape(DISCOUNT_CODES[code_key]['title'])}</b> "
+                f"({to_persian_digits(str(percent))}٪)\n"
+                f"💵 قیمت اصلی: {format_toman(plan['toman'])}\n"
+            )
         try:
             _, plan_sub_key, _ = find_plan(plan["id"])
             order_id = await create_order(
-                user.id, plan["label"], price_text, plan["toman"],
+                user.id, plan["label"], price_text, final_toman,
                 DURATION_DAYS.get(plan_sub_key, 30), renewal_username, file_id, is_photo,
+                discount_code=code_key if percent else None,
+                discount_percent=percent or None,
+                original_toman=plan["toman"] if percent else None,
             )
         except Exception:
             logger.exception("create_order failed for user %s", user.id)
             db_failed = True
 
+    amount_label = "💰 مبلغ با تخفیف" if percent else "💰 مبلغ"
     admin_keyboard = None
     if plan and order_id is not None:
         caption = (
@@ -883,8 +1254,9 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{user_block}"
             f"{renewal_line}"
             f"📦 پلن انتخابی: <b>{html.escape(plan['label'])}</b>\n"
-            f"💰 مبلغ: <b>{price_text}</b>\n"
-            f"💱 معادل ریالی: <b>{format_rial(plan['toman'])}</b>"
+            f"{discount_line}"
+            f"{amount_label}: <b>{price_text}</b>\n"
+            f"💱 معادل ریالی: <b>{format_rial(final_toman)}</b>"
         )
         admin_keyboard = InlineKeyboardMarkup([
             [
@@ -899,7 +1271,8 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{user_block}"
             f"{renewal_line}"
             f"📦 پلن انتخابی: <b>{html.escape(plan['label'])}</b>\n"
-            f"💰 مبلغ: <b>{price_text}</b>\n\n"
+            f"{discount_line}"
+            f"{amount_label}: <b>{price_text}</b>\n\n"
             "⚠️ ثبت سفارش در دیتابیس انجام نشد، لطفاً دستی پیگیری کنید."
         )
     else:
@@ -911,16 +1284,7 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     try:
-        if is_photo:
-            await context.bot.send_photo(
-                chat_id=ADMIN_ID, photo=file_id, caption=caption,
-                parse_mode="HTML", reply_markup=admin_keyboard,
-            )
-        else:
-            await context.bot.send_document(
-                chat_id=ADMIN_ID, document=file_id, caption=caption,
-                parse_mode="HTML", reply_markup=admin_keyboard,
-            )
+        await send_receipt_to_admin(context.bot, file_id, is_photo, caption, admin_keyboard)
     except TelegramError:
         logger.exception("Failed to forward receipt from user %s to admin", user.id)
         keyboard = InlineKeyboardMarkup([
@@ -932,13 +1296,18 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await message.reply_text(
-        "✅ رسید شما با موفقیت دریافت شد و برای ادمین ارسال گردید.\n"
-        "به محض تایید، به شما اطلاع داده خواهد شد. لطفاً کمی شکیبا باشید 🙏"
-    )
+    if media_group_id:
+        context.user_data["ack_media_group"] = media_group_id
+    if not already_acked:
+        await message.reply_text(
+            "✅ رسید شما با موفقیت دریافت شد و برای ادمین ارسال گردید.\n"
+            "به محض تایید، به شما اطلاع داده خواهد شد. لطفاً کمی شکیبا باشید 🙏"
+        )
 
     context.user_data.pop("pending_plan", None)
     context.user_data.pop("renewal_username", None)
+    context.user_data.pop("discount_code", None)
+    context.user_data["awaiting_discount"] = False
     await delete_user_state(user.id)
 
     if order_id is not None:
@@ -1060,16 +1429,28 @@ async def append_to_admin_message(query, suffix: str):
     else:
         await query.edit_message_text(text=(msg.text_html or "") + suffix, parse_mode="HTML")
 
-def build_pending_caption(order_id, user_id, plan_label, price, created_at, renewal_username) -> str:
+def build_pending_caption(
+    order_id, user_id, plan_label, price, created_at, renewal_username,
+    discount_code=None, discount_percent=None, original_toman=None,
+) -> str:
     renewal_line = (
         f"🔄 نام کاربری سرور جهت تمدید: <code>{html.escape(renewal_username)}</code>\n"
         if renewal_username else ""
     )
+    discount_line = ""
+    if discount_percent:
+        title = DISCOUNT_CODES.get(discount_code or "", {}).get("title", discount_code or "")
+        discount_line = (
+            f"🏷 کد تخفیف: <b>{html.escape(title)}</b> ({to_persian_digits(str(discount_percent))}٪)"
+            + (f" — قیمت اصلی: {format_toman(original_toman)}" if original_toman else "")
+            + "\n"
+        )
     return (
         f"🧾 <b>رسید در انتظار بررسی (سفارش #{order_id})</b>\n\n"
         f"🆔 آیدی کاربر: <code>{user_id}</code>\n"
         f"{renewal_line}"
         f"📦 پلن: <b>{html.escape(plan_label)}</b>\n"
+        f"{discount_line}"
         f"💰 مبلغ: <b>{html.escape(price)}</b>\n"
         f"🗓 ثبت: {html.escape(created_at or '---')}"
     )
@@ -1081,6 +1462,16 @@ def order_action_keyboard(order_id: int):
             InlineKeyboardButton("❌ رد", callback_data=f"reject_{order_id}"),
         ]
     ])
+
+def reject_reasons_keyboard(order_id: int):
+    """منوی دلایل آماده‌ی رد؛ ادمین یکی را می‌زند و همان برای کاربر فرستاده می‌شود."""
+    rows = [
+        [InlineKeyboardButton(title, callback_data=f"rejr_{order_id}_{i}")]
+        for i, (title, _text) in enumerate(REJECT_REASONS)
+    ]
+    rows.append([InlineKeyboardButton("🚫 رد بدون دلیل", callback_data=f"rejr_{order_id}_x")])
+    rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data=f"rejb_{order_id}")])
+    return InlineKeyboardMarkup(rows)
 
 async def admin_help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -1098,7 +1489,8 @@ async def admin_help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = await asyncio.to_thread(
         _db_execute,
-        "SELECT id, user_id, plan_label, price, created_at, renewal_username, receipt_file_id, receipt_is_photo "
+        "SELECT id, user_id, plan_label, price, created_at, renewal_username, receipt_file_id, receipt_is_photo, "
+        "discount_code, discount_percent, original_toman "
         "FROM orders WHERE status = 'pending' ORDER BY id LIMIT 20",
         (), "all",
     )
@@ -1108,8 +1500,8 @@ async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"🧾 {to_persian_digits(str(len(rows)))} رسید در انتظار بررسی (حداکثر ۲۰ مورد نمایش داده می‌شود):"
     )
-    for oid, uid, label, price, created_at, renewal, file_id, is_photo in rows:
-        caption = build_pending_caption(oid, uid, label, price, created_at, renewal)
+    for oid, uid, label, price, created_at, renewal, file_id, is_photo, d_code, d_percent, d_orig in rows:
+        caption = build_pending_caption(oid, uid, label, price, created_at, renewal, d_code, d_percent, d_orig)
         kb = order_action_keyboard(oid)
         try:
             if file_id and is_photo:
@@ -1418,7 +1810,10 @@ async def send_expiry_reminders(bot):
         "AND n.status = 'confirmed' AND n.expires_at > o.expires_at)",
         (now, now + timedelta(days=REMINDER_DAYS_BEFORE)), "all",
     )
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تمدید سرور", callback_data="renew")]])
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 تمدید سرور", callback_data="renew")],
+        [InlineKeyboardButton("📊 چک کردن مانده حجم", url=f"https://t.me/{BALANCE_BOT_USERNAME}")],
+    ])
     for oid, uid, label, expires_at in rows or []:
         days_left = max(1, math.ceil((expires_at - now).total_seconds() / 86400))
         text = (
